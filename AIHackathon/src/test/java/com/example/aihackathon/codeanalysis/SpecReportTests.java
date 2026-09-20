@@ -40,6 +40,27 @@ class SpecReportTests {
         assertThat(result.html().content()).contains("Phạm vi tài liệu");
     }
 
+    /**
+     * Tài liệu đặc tả không ghi file .puml riêng, nên mã sơ đồ phải nằm trong chính file HTML -
+     * kèm chú thích để người đọc biết cần cài tool mới xem được hình.
+     */
+    @Test
+    void htmlDacTaNhungMaPumlKemHuongDanXem() {
+        String html = this.analyzer
+                .collectSpec(FixtureRepo.REPO_URL, "master", "POST", "/api/orders")
+                .html().content();
+
+        assertThat(html)
+                .contains("Sơ đồ tuần tự (mã PlantUML)")
+                .contains("@startuml")
+                .contains("@enduml")
+                .contains("MÃ NGUỒN của sơ đồ, không phải hình ảnh")
+                .contains("https://www.plantuml.com/plantuml/uml/")
+                .contains("PlantUML Integration")
+                .contains("post-api-orders.puml")
+                .doesNotContain("Sơ đồ tuần tự nằm ở file .puml đi kèm");
+    }
+
     @Test
     void mucCanXacNhanDatTruocPhanMoTa() {
         String markdown = this.analyzer

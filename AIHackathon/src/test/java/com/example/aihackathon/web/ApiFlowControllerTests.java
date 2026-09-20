@@ -13,6 +13,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -136,6 +138,43 @@ class ApiFlowControllerTests {
                         org.hamcrest.Matchers.containsString(".java")))
                 .andExpect(jsonPath("$.evidence[0].line").value(
                         org.hamcrest.Matchers.greaterThan(0)));
+    }
+
+    @Test
+    void traVeFilePumlChoPostApiFlow() throws Exception {
+        this.mockMvc.perform(post("/api/analyze/api-flow.puml")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body("""
+                                {"repoUrl":"%s","branch":"master","httpMethod":"POST","path":"/api/orders"}
+                                """)))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Disposition",
+                        org.hamcrest.Matchers.allOf(
+                                org.hamcrest.Matchers.containsString("attachment"),
+                                org.hamcrest.Matchers.containsString(".puml"))))
+                .andExpect(content().string(org.hamcrest.Matchers.startsWith("@startuml")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("OrderController")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("@enduml")));
+    }
+
+    @Test
+    void pumlTraVe404KhiKhongCoEndpointKhop() throws Exception {
+        this.mockMvc.perform(post("/api/analyze/api-flow.puml")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body("""
+                                {"repoUrl":"%s","httpMethod":"POST","path":"/api/invoices"}
+                                """)))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void pumlTraVe400KhiThieuCaPathVaSummary() throws Exception {
+        this.mockMvc.perform(post("/api/analyze/api-flow.puml")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body("""
+                                {"repoUrl":"%s"}
+                                """)))
+                .andExpect(status().isBadRequest());
     }
 
     @Test

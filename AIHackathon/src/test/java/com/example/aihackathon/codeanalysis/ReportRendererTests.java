@@ -129,6 +129,59 @@ class ReportRendererTests {
     }
 
     // ------------------------------------------------------------------
+    // Mã PlantUML nhúng trong HTML
+    // ------------------------------------------------------------------
+
+    /**
+     * File HTML phải tự chứa đủ: người nhận qua chat/email không có file .puml trên máy chạy
+     * server, nên mã sơ đồ phải nằm ngay trong trang.
+     */
+    @Test
+    void htmlNhungNguyenVanMaPuml() {
+        String withPuml = HtmlReportRenderer.render(flow, FlowSummarizer.extract(flow), null, null,
+                null, null, PlantUmlRenderer.render(flow));
+
+        assertThat(withPuml)
+                .contains("Sơ đồ tuần tự (mã PlantUML)")
+                .contains("@startuml")
+                .contains("@enduml")
+                .contains("OrderServiceImpl");
+    }
+
+    /** Thấy khối chữ lạ mà không có chú thích thì người đọc kết luận "báo cáo lỗi". */
+    @Test
+    void htmlNoiRoDoLaMaSoDoVaCanToolDeXemHinh() {
+        String withPuml = HtmlReportRenderer.render(flow, FlowSummarizer.extract(flow), null, null,
+                null, null, PlantUmlRenderer.render(flow));
+
+        assertThat(withPuml)
+                .contains("MÃ NGUỒN của sơ đồ, không phải hình ảnh")
+                .contains("PlantUML Integration")
+                .contains("jebbs.plantuml")
+                .contains("plantuml.jar")
+                .contains("post-api-orders.puml");
+        // cach xem online (khong can cai gi) phai co, va dat truoc cac cach phai cai dat
+        assertThat(withPuml)
+                .contains("https://www.plantuml.com/plantuml/uml/")
+                .contains("https://editor.plantuml.com/");
+        assertThat(withPuml.indexOf("Xem online")).isLessThan(withPuml.indexOf("IntelliJ IDEA"));
+        // nhung van phai noi ro cai gia cua cach online
+        assertThat(withPuml).contains("Lưu ý khi dùng cách online");
+        // footer khong duoc tro nguoi doc di tim file ben ngoai nua
+        assertThat(withPuml).doesNotContain("Sơ đồ tuần tự nằm ở file .puml đi kèm");
+    }
+
+    @Test
+    void maPumlNhungVaoHtmlVanDuocEscape() {
+        String withPuml = HtmlReportRenderer.render(flow, FlowSummarizer.extract(flow), null, null,
+                null, null, "@startuml\nnote over X: <script>alert(1)</script>\n@enduml\n");
+
+        assertThat(withPuml)
+                .contains("&lt;script&gt;alert(1)&lt;/script&gt;")
+                .doesNotContain("<script");
+    }
+
+    // ------------------------------------------------------------------
     // Markdown
     // ------------------------------------------------------------------
 

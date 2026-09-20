@@ -12,10 +12,11 @@ import com.example.aihackathon.codeanalysis.model.FlowComparison;
  * <p>Không cần cài gì: mọi máy đều có browser, và file không phụ thuộc javascript nào - toàn bộ
  * nội dung là HTML thuần nên mở offline vẫn đầy đủ.
  *
- * <p><b>Cố tình KHÔNG có sơ đồ tuần tự.</b> Báo cáo HTML là nơi đọc chữ: bảng thông tin, dữ liệu
- * bị tác động, điều kiện rẽ nhánh, nhánh lỗi. Sơ đồ nằm ở file .puml - định dạng đó vẽ được chi
- * tiết hơn nhiều (tầng database tường minh, mã HTTP khi lỗi, kiểu trả về) mà không bị giới hạn bởi
- * việc phải render trong browser.
+ * <p><b>Không có hình sơ đồ, chỉ có mã sơ đồ.</b> Báo cáo HTML là nơi đọc chữ: bảng thông tin, dữ
+ * liệu bị tác động, điều kiện rẽ nhánh, nhánh lỗi. Sơ đồ tuần tự được nhúng dưới dạng mã PlantUML
+ * kèm hướng dẫn cài tool ({@link PlantUmlSection}) - định dạng đó vẽ được chi tiết hơn nhiều (tầng
+ * database tường minh, mã HTTP khi lỗi, kiểu trả về) mà không bị giới hạn bởi việc phải render
+ * trong browser, và nhúng nguyên văn thì file HTML tự chứa đủ để dựng lại sơ đồ.
  *
  * <p>Mọi nội dung lấy từ repo đều đi qua {@link #escapeHtml}: tên method, điều kiện if, câu
  * query đều là dữ liệu không đáng tin (repo có thể chứa chuỗi trông như thẻ HTML), và file này
@@ -32,6 +33,14 @@ final class HtmlReportRenderer {
 
     static String render(ApiFlow flow, MarkdownReportRenderer.FlowFacts facts, CodeSpec spec,
             String narrative, String aiNote, FlowComparison comparison) {
+        return render(flow, facts, spec, narrative, aiNote, comparison, null);
+    }
+
+    /**
+     * @param puml mã PlantUML để nhúng vào trang; null/blank thì bỏ qua mục sơ đồ
+     */
+    static String render(ApiFlow flow, MarkdownReportRenderer.FlowFacts facts, CodeSpec spec,
+            String narrative, String aiNote, FlowComparison comparison, String puml) {
         StringBuilder out = new StringBuilder(8192);
         String title = flow.endpoint().label();
 
@@ -63,14 +72,16 @@ final class HtmlReportRenderer {
 
         appendDetails(out, "Trình tự chi tiết", facts.outline(), true);
 
+        PlantUmlSection.appendHtml(out, flow, puml);
+
         AiSectionRenderer.appendEvidenceHtml(out, spec);
         AiSectionRenderer.appendComparisonHtml(out, comparison);
 
         out.append("<footer>")
                 .append(escapeHtml(MarkdownReportRenderer.provenanceFooter(narrative, aiNote,
                         comparison)))
-                .append("<br>Sơ đồ tuần tự nằm ở file .puml đi kèm - mở bằng plugin PlantUML."
-                        + "</footer>\n");
+                .append("<br>").append(escapeHtml(PlantUmlSection.footerNote(puml)))
+                .append("</footer>\n");
 
         out.append("</body>\n</html>\n");
         return out.toString();
@@ -115,6 +126,7 @@ final class HtmlReportRenderer {
                          background: #eef1f4; font-size: 12px; color: var(--muted); }
                 """);
         out.append(AiSectionRenderer.aiStyles());
+        out.append(PlantUmlSection.styles());
         out.append("</style>\n");
     }
 

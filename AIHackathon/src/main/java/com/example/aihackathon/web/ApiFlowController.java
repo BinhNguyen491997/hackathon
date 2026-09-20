@@ -1,6 +1,9 @@
 package com.example.aihackathon.web;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import com.example.aihackathon.codeanalysis.ApiFlowAnalyzer;
@@ -12,6 +15,8 @@ import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -50,6 +55,33 @@ public class ApiFlowController {
     /** Phân tích một endpoint và sinh sequence diagram. */
     @PostMapping(path = "/api/analyze/api-flow", produces = MediaType.APPLICATION_JSON_VALUE)
     public ApiFlowResponse analyze(@Valid @RequestBody ApiFlowRequest request) {
+        return ApiFlowResponse.from(runFlow(request));
+    }
+
+    /**
+     * Sơ đồ tuần tự dạng PlantUML, trả về như một file .puml để tải xuống.
+     *
+     * <p>Cùng body với {@code /api/analyze/spec.html}. Khác {@code /api/analyze/api-flow} ở chỗ
+     * response không phải JSON mà là nội dung {@code .puml} thô kèm {@code Content-Disposition:
+     * attachment}, nên {@code curl -OJ} hay browser lưu thẳng ra file mở được bằng plugin
+     * PlantUML - không phải bóc field {@code formats.puml.content} ra khỏi JSON rồi tự unescape.
+     *
+     * <p>Tên file lấy theo file mà analyzer đã ghi (có gắn commit SHA) để hai lần release không
+     * ghi đè nhau; nếu việc ghi file thất bại thì dựng tên từ method + path.
+     */
+    @PostMapping(path = "/api/analyze/api-flow.puml", produces = "text/plain; charset=UTF-8")
+    public ResponseEntity<String> apiFlowAsPuml(@Valid @RequestBody ApiFlowRequest request) {
+        ApiFlowAnalyzer.AnalysisResult result = runFlow(request);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
+                        .filename(pumlFileName(result), StandardCharsets.UTF_8)
+                        .build()
+                        .toString())
+                .contentType(new MediaType(MediaType.TEXT_PLAIN, StandardCharsets.UTF_8))
+                .body(result.puml().content());
+    }
+
+    private ApiFlowAnalyzer.AnalysisResult runFlow(ApiFlowRequest request) {
         if (!request.hasPath() && !request.hasSummary()) {
             throw new IllegalArgumentException("Cần ít nhất một trong hai: path hoặc summary.");
         }
@@ -67,7 +99,21 @@ public class ApiFlowController {
                 (System.nanoTime() - startNanos) / 1_000_000, result.flow().endpoint().label(),
                 result.flow().participants().size(), result.aiUsed(),
                 result.comparison().aiResponded());
-        return ApiFlowResponse.from(result);
+        return result;
+    }
+
+    /** Tên file .puml gợi ý cho client, không bao giờ chứa ký tự cấm của filesystem. */
+    private static String pumlFileName(ApiFlowAnalyzer.AnalysisResult result) {
+        Path written = result.puml().file();
+        if (written != null && written.getFileName() != null) {
+            return written.getFileName().toString();
+        }
+        ApiEndpoint endpoint = result.flow().endpoint();
+        String name = (endpoint.httpMethod() + endpoint.path())
+                .replaceAll("[^A-Za-z0-9]+", "-")
+                .replaceAll("(^-|-$)", "")
+                .toLowerCase(Locale.ROOT);
+        return (name.isBlank() ? "api-flow" : name) + ".puml";
     }
 
     /**
