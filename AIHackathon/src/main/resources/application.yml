@@ -111,6 +111,15 @@ analysis:
     username: ${GIT_USERNAME:}
     password: ${GIT_PASSWORD:}
     #
+    # Cách 4: người gọi tự truyền token trong body của POST (trường "gitToken").
+    #   Dùng khi chưa cấu hình được env trên môi trường deploy, hoặc khi muốn mỗi người dùng đi
+    #   bằng token của chính mình (server không giữ credential nào, quyền đọc repo = quyền người gọi).
+    #   Ưu tiên: gitToken trong request > analysis.git.token > username + password.
+    #   Chỉ nhận qua body POST, KHÔNG nhận qua query param của các endpoint GET .html/.md.
+    #   Đặt false khi token phải do hệ thống quản lý (đọc từ database/vault): lúc đó request có
+    #   gitToken bị từ chối thẳng chứ không âm thầm dùng token của server.
+    allow-request-token: ${ANALYSIS_ALLOW_REQUEST_TOKEN:true}
+    #
     # Lưu ý: KHÔNG nhúng tài khoản vào URL (https://user:pass@host/...). Fetcher từ chối dạng
     # này vì URL repo bị ghi vào log và trả lại trong response JSON.
     default-branch: ${ANALYSIS_DEFAULT_BRANCH:master}

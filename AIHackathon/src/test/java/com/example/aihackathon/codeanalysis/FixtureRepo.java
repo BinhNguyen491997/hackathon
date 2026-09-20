@@ -70,13 +70,17 @@ public final class FixtureRepo {
 
         public int calls;
 
+        /** Token mà lớp trên truyền xuống ở lần fetch gần nhất - để test kiểm tra đường đi. */
+        public String lastToken;
+
         public StubFetcher(AnalysisProperties properties) {
             super(properties);
         }
 
         @Override
-        public FetchedRepo fetch(String repoUrl, String branch) {
+        public FetchedRepo fetch(String repoUrl, String branch, String requestToken) {
             this.calls++;
+            this.lastToken = requestToken;
             return new FetchedRepo(REPO_URL, BRANCH, this.commitSha, root(), true);
         }
     }

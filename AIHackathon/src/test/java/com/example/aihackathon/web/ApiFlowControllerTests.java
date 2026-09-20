@@ -2,6 +2,8 @@ package com.example.aihackathon.web;
 
 import java.nio.charset.StandardCharsets;
 
+import com.example.aihackathon.codeanalysis.AnalysisProperties;
+import com.example.aihackathon.codeanalysis.ApiFlowAnalyzer;
 import com.example.aihackathon.codeanalysis.FixtureRepo;
 import com.example.aihackathon.codeanalysis.FlowProposer;
 import com.example.aihackathon.codeanalysis.NarrativeWriter;
@@ -12,6 +14,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -26,12 +29,16 @@ class ApiFlowControllerTests {
 
     private MockMvc mockMvc;
 
+    private FixtureRepo.StubFetcher fetcher;
+
     @BeforeEach
     void setUp() {
         // NarrativeWriter.NONE + FlowProposer.NONE = che do khong dung AI, nen test web khong can key
+        AnalysisProperties properties = FixtureRepo.properties();
+        this.fetcher = new FixtureRepo.StubFetcher(properties);
         this.mockMvc = MockMvcBuilders
-                .standaloneSetup(new ApiFlowController(FixtureRepo.analyzer(), NarrativeWriter.NONE,
-                        FlowProposer.NONE))
+                .standaloneSetup(new ApiFlowController(new ApiFlowAnalyzer(this.fetcher, properties),
+                        NarrativeWriter.NONE, FlowProposer.NONE))
                 .build();
     }
 
@@ -177,9 +184,113 @@ class ApiFlowControllerTests {
                 .andExpect(status().isBadRequest());
     }
 
+    // ------------------------------------------------------------------
+    // Token GitLab truyền theo request
+    // ------------------------------------------------------------------
+
     @Test
-    void lietKeEndpoint() throws Exception {
-        this.mockMvc.perform(post("/api/analyze/endpoints")
+    void gitTokenTrongBodyDiXuongToiFetcher() throws Exception {
+        this.mockMvc.perform(post("/api/analyze/api-flow")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body("""
+                                {"repoUrl":"%s","httpMethod":"POST","path":"/api/orders",
+                                 "gitToken":"glpat-cua-nguoi-goi"}
+                                """)))
+                .andExpect(status().isOk());
+
+        assertThat(this.fetcher.lastToken).isEqualTo("glpat-cua-nguoi-goi");
+    }
+
+    @Test
+    void khongTruyenGitTokenThiFetcherNhanNull() throws Exception {
+        this.mockMvc.perform(post("/api/analyze/spec")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body("""
+                                {"repoUrl":"%s","httpMethod":"POST","path":"/api/orders"}
+                                """)))
+                .andExpect(status().isOk());
+
+        assertThat(this.fetcher.lastToken).isNull();
+    }
+
+    @Test
+    void gitTokenDiXuongTuMoiEndpointPost() throws Exception {
+        record Case(String path, String body) {
+        }
+        for (Case testCase : java.util.List.of(
+                new Case("/api/analyze/api-flow.puml",
+                        """
+                        {"repoUrl":"%s","httpMethod":"POST","path":"/api/orders","gitToken":"glpat-1"}
+                        """),
+                new Case("/api/analyze/spec.html",
+                        """
+                        {"repoUrl":"%s","httpMethod":"POST","path":"/api/orders","gitToken":"glpat-2"}
+                        """),
+                new Case("/api/analyze/evidence",
+                        """
+                        {"repoUrl":"%s","httpMethod":"POST","path":"/api/orders","gitToken":"glpat-3"}
+                        """),
+                new Case("/api/analyze/endpoints",
+                        """
+                        {"repoUrl":"%s","gitToken":"glpat-4"}
+                        """))) {
+
+            this.fetcher.lastToken = null;
+            this.mockMvc.perform(post(testCase.path())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body(testCase.body())))
+                    .andExpect(status().isOk());
+
+            assertThat(this.fetcher.lastToken)
+                    .as("token phải đi xuống fetcher từ %s", testCase.path())
+                    .isNotNull()
+                    .startsWith("glpat-");
+        }
+    }
+
+    /** Token không được lọt vào response, kể cả khi request lỗi. */
+    @Test
+    void gitTokenKhongXuatHienTrongResponse() throws Exception {
+        String ok = this.mockMvc.perform(post("/api/analyze/api-flow")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body("""
+                                {"repoUrl":"%s","httpMethod":"POST","path":"/api/orders",
+                                 "gitToken":"glpat-khong-duoc-lo"}
+                                """)))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        String notFound = this.mockMvc.perform(post("/api/analyze/api-flow")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body("""
+                                {"repoUrl":"%s","httpMethod":"POST","path":"/api/invoices",
+                                 "gitToken":"glpat-khong-duoc-lo"}
+                                """)))
+                .andExpect(status().isNotFound())
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(ok).doesNotContain("glpat-khong-duoc-lo");
+        assertThat(notFound).doesNotContain("glpat-khong-duoc-lo");
+    }
+
+    /** toString của request bị nhỡ tay đưa vào log là đường lộ token dễ nhất. */
+    @Test
+    void toStringCuaRequestAnToken() {
+        ApiFlowRequest request = new ApiFlowRequest("https://gitlab.com/team/shop.git", "master",
+                "POST", "/api/orders", null, false, false, "glpat-khong-duoc-lo");
+
+        assertThat(request.toString())
+                .doesNotContain("glpat-khong-duoc-lo")
+                .contains("gitToken=***")
+                .contains("/api/orders");
+        assertThat(new ApiFlowController.EndpointListRequest("https://gitlab.com/team/shop.git",
+                "master", "glpat-khong-duoc-lo").toString())
+                .doesNotContain("glpat-khong-duoc-lo")
+                .contains("gitToken=***");
+    }
+
+    @Test
+    void lietKeEndpoint() throws Exception {        this.mockMvc.perform(post("/api/analyze/endpoints")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body("""
                                 {"repoUrl":"%s","branch":"master"}
