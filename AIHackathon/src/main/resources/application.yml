@@ -1,0 +1,138 @@
+spring:
+  application:
+    name: work-agent
+
+  ai:
+    openai:
+      # Provider mặc định: GreenNode MaaS (API tương thích OpenAI), serve trên domain VNG Cloud.
+      #
+      # QUAN TRỌNG: Spring AI 2.x dùng OpenAI Java SDK chính thức. SDK nối thẳng
+      # "chat/completions" vào base-url (default của nó là https://api.openai.com/v1),
+      # nên base-url PHẢI kèm "/v1".
+      #
+      #   GreenNode MaaS (HCM) : https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1
+      #   OpenAI               : https://api.openai.com/v1
+      #   Ollama local         : http://localhost:11434/v1
+      base-url: ${LLM_BASE_URL:https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1}
+      # API key lấy ở GreenNode portal -> Model as a Service -> API key.
+      # TUYỆT ĐỐI không hardcode vào file này (file được commit vào git) — chỉ truyền qua
+      # env LLM_API_KEY. Để trống là bật "no-auth mode" của SDK (bỏ hẳn header Authorization)
+      # nên endpoint trả 401; LlmStartupCheck sẽ fail fast trước khi tới đó.
+      api-key: ${LLM_API_KEY:}
+      chat:
+        # Model id của GreenNode MaaS. Xem danh sách:
+        #   curl -H "Authorization: Bearer $env:LLM_API_KEY" "$env:LLM_BASE_URL/models"
+        # Phải là model hỗ trợ function calling, vì agent này dựa vào tool calling.
+        model: ${LLM_MODEL:z-ai/glm-5.2-hackathon}
+        temperature: ${LLM_TEMPERATURE:0.3}
+        top-p: ${LLM_TOP_P:0.95}
+        # GLM là model reasoning: token suy luận cũng tính vào completion_tokens,
+        # nên cần hạn mức đủ rộng để câu trả lời không bị cắt giữa dòng.
+        max-tokens: ${LLM_MAX_TOKENS:4096}
+
+server:
+  port: ${PORT:8080}
+
+agent:
+  # Múi giờ dùng cho tool ngày/giờ
+  timezone: Asia/Ho_Chi_Minh
+  memory:
+    # Số message tối đa giữ trong bộ nhớ trước khi nén
+    window: ${AGENT_MEMORY_WINDOW:40}
+    # Sau khi nén: giữ nguyên văn N message gần nhất, phần cũ hơn thành 1 message tóm tắt
+    keep-recent: ${AGENT_MEMORY_KEEP_RECENT:12}
+    # false = chỉ cắt cửa sổ trượt (không tốn thêm 1 lần gọi model để tóm tắt)
+    summarize: ${AGENT_MEMORY_SUMMARIZE:true}
+    summary-max-words: ${AGENT_MEMORY_SUMMARY_MAX_WORDS:200}
+    # Bỏ reasoning_content của GLM khỏi history để không gửi lại mỗi lượt
+    strip-reasoning: ${AGENT_MEMORY_STRIP_REASONING:true}
+  # Shared secret để client cá nhân gọi lên. Để trống = KHÔNG xác thực (chỉ dùng khi chạy localhost).
+  api-key: ${AGENT_API_KEY:}
+  llm:
+    # Timeout cho lời gọi HTTP tới LLM. Mặc định của OkHttp (~10-60s tuỳ loại) hay không đủ cho
+    # model reasoning (GLM) hoặc request đối chiếu call graph (gửi cả nguyên văn source code).
+    # Nếu vẫn gặp OpenAIIoException sau khi tăng số này thì không phải do timeout - kiểm tra
+    # DNS/proxy/firewall tới LLM_BASE_URL.
+    timeout-seconds: ${AGENT_LLM_TIMEOUT_SECONDS:360}
+
+# Phân tích source code để sinh sequence diagram (POST /api/analyze/api-flow)
+analysis:
+  # Nơi chứa bản clone tạm của repo cần phân tích. Agent tự tạo và tự xoá trong thư mục này.
+  workspace: ${ANALYSIS_WORKSPACE:${java.io.tmpdir}/agent-code-analysis}
+  # Nơi ghi file .puml sinh ra
+  output-dir: ${ANALYSIS_OUTPUT_DIR:${java.io.tmpdir}/agent-code-analysis/diagrams}
+  # Hàng rào chống nổ bộ nhớ/thời gian với monolith lớn. Vượt hạn mức thì diagram bị cắt
+  # và ghi rõ lý do trong phần legend, chứ không treo server.
+  max-source-files: ${ANALYSIS_MAX_SOURCE_FILES:4000}
+  max-depth: ${ANALYSIS_MAX_DEPTH:6}
+  max-nodes: ${ANALYSIS_MAX_NODES:400}
+  # true = đi sâu cả vào Mapper/Validator/Util. Mặc định false để diagram còn đọc được.
+  expand-support-types: ${ANALYSIS_EXPAND_SUPPORT:false}
+  ai:
+    # Hạn mức ký tự source gửi cho LLM ở bước đối chiếu chéo (crossCheckWithAi).
+    max-source-chars: ${ANALYSIS_AI_MAX_SOURCE_CHARS:40000}
+    # Cache kết quả gọi LLM xuống <output-dir>/ai-cache, khoá theo commit + endpoint + model.
+    # Thứ được cache là TIỀN, không phải thời gian: hỏi lại cùng endpoint trên cùng commit mà
+    # không cache là trả tiền token lần nữa, và bước đối chiếu còn gửi lại source ra ngoài lần nữa.
+    # false = luôn gọi model. Cache nằm trên đĩa nên bền qua restart; muốn bền qua redeploy
+    # container thì mount volume vào output-dir.
+    cache: ${ANALYSIS_AI_CACHE:true}
+    # Model id đưa vào khoá cache - đổi model thì cache phải miss, không được trả bản cũ.
+    # Lấy thẳng từ cấu hình LLM ở trên, không cần khai báo lại.
+    model: ${spring.ai.openai.chat.model:}
+  database:
+    # Tên database mà tầng repository nói chuyện với. Phân tích tĩnh chỉ thấy "gọi vào
+    # OrderRepository.save()"; việc repository đó thực ra đọc/ghi vào đâu là kiến thức hệ thống,
+    # không nằm trong code. Khai báo ở đây để tài liệu và sơ đồ nói đúng ngôn ngữ nghiệp vụ.
+    name: ${ANALYSIS_DATABASE_NAME:Way4}
+    # true = vẽ database thành một participant riêng trên sequence diagram, và mỗi lời gọi
+    # repository có thêm một chặng repository -> database.
+    show-in-diagram: ${ANALYSIS_DATABASE_IN_DIAGRAM:true}
+  git:
+    # --- Xác thực. Thứ tự ưu tiên: token > username + password ---
+    # TUYỆT ĐỐI không hardcode ở đây (file này được commit) - chỉ truyền qua biến môi trường.
+    #
+    # Cách 1 (khuyến nghị): personal access token, scope read_repository.
+    #   GitLab -> Settings -> Access tokens.
+    #   Khi tài khoản bật 2FA, đây là cách DUY NHẤT dùng được cho Git over HTTPS - GitLab
+    #   không nhận password nữa (tài liệu GitLab, mục "Sign in with a personal access token").
+    #   read_repository là đủ cho git clone, không cần scope api.
+    #   Nếu instance nào từ chối username "oauth2", dùng cách 2 với username thật + PAT
+    #   làm password thay vì sửa code.
+    token: ${GITLAB_TOKEN:}
+    #
+    # Cách 2: deploy token - dành riêng cho truy cập chỉ-đọc tự động, phạm vi 1 project.
+    #   GitLab -> Settings -> Repository -> Deploy tokens, tick scope read_repository.
+    #   GIT_USERNAME=gitlab+deploy-token-123   GIT_PASSWORD=<token secret>
+    #   Không bị 2FA ảnh hưởng vì đây không phải tài khoản người dùng.
+    #
+    # Cách 3: tài khoản/mật khẩu thường. CHỈ chạy với GitLab self-hosted KHÔNG bật 2FA.
+    #   Tài khoản có 2FA sẽ bị GitLab từ chối ở tầng Git HTTPS (báo 401), không phải lỗi code.
+    username: ${GIT_USERNAME:}
+    password: ${GIT_PASSWORD:}
+    #
+    # Lưu ý: KHÔNG nhúng tài khoản vào URL (https://user:pass@host/...). Fetcher từ chối dạng
+    # này vì URL repo bị ghi vào log và trả lại trong response JSON.
+    default-branch: ${ANALYSIS_DEFAULT_BRANCH:master}
+    timeout-seconds: ${ANALYSIS_GIT_TIMEOUT:180}
+    # Để trống = cho phép clone từ mọi host. Endpoint này (và tool của LLM) nhận URL từ input
+    # người dùng, nên khi deploy ra ngoài localhost BẮT BUỘC liệt kê host cụ thể.
+    # allowed-hosts: gitlab.com,gitlab.company.vn
+    allowed-hosts: ${ANALYSIS_ALLOWED_HOSTS:}
+
+logging:
+  level:
+    org.springframework.ai: INFO
+    # Log từng giai đoạn của luồng: controller -> agent (thời gian + token) -> tool -> memory
+    com.example.aihackathon: INFO
+    # Bật DEBUG để thấy file .java nào parse lỗi khi phân tích repo
+    # com.example.aihackathon.codeanalysis: DEBUG
+    # JGit log khá ồn ở mức INFO
+    org.eclipse.jgit: WARN
+    # Bật DEBUG để thấy thêm: số message trong memory mỗi lượt, số reasoning bị strip
+    # com.example.aihackathon.memory: DEBUG
+    # Bật DEBUG để dump TOÀN BỘ prompt + response với model (rất dài, chỉ dùng khi debug)
+    org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor: DEBUG
+  pattern:
+    # thêm mili giây và tên logger ngắn để đọc luồng dễ hơn
+    console: "%d{HH:mm:ss.SSS} %-5level [%thread] %logger{25} - %msg%n"

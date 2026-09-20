@@ -1,0 +1,661 @@
+@startuml sequence-phan-tich-api
+title POST /api/analyze/api-flow — phân tích tĩnh là lõi, AI là hai lớp phủ tuỳ chọn
+
+autonumber "<b>[0]"
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 260
+
+actor "BA / Developer" as User
+
+box "Vào bằng REST" #FDF6E3
+participant "ApiKeyFilter" as Filter
+participant "ApiFlowController" as Controller
+end box
+
+box "Điều phối" #E8F4FD
+participant "ApiFlowAnalyzer" as Analyzer
+participant "snapshots\nMap<repo#branch, RepoSnapshot>" as Cache
+end box
+
+box "Lấy source" #FFF0F0
+participant "GitRepoFetcher" as Fetcher
+end box
+
+box "Phân tích tĩnh (JavaParser) — tất định" #E8FDE8
+participant "JavaSourceIndex" as Index
+participant "TypeClassifier" as Classifier
+participant "EndpointScanner" as Scanner
+participant "CallFlowBuilder" as Builder
+participant "EvidenceCollector" as Evidence
+participant "StoredProcedureScanner" as Procedures
+participant "ErrorCodeScanner" as Errors
+end box
+
+box "Lớp phủ AI (chỉ khi bật cờ)" #FFF6E5
+participant "AiResultCache\nJSON ở <output-dir>/ai-cache" as Cache2
+participant "SpecNarrator\n(useAi)" as Narrator
+participant "CitationValidator" as Citations
+participant "SourceBundleBuilder" as Bundle
+participant "LlmFlowProposer\n(crossCheckWithAi)" as Proposer
+participant "FlowComparator" as Comparator
+participant "UnresolvedLinker" as Linker
+end box
+
+box "Kết xuất — 4 định dạng, 1 nguồn sự thật" #F3F0FA
+participant "FlowSummarizer" as Summarizer
+participant "MermaidRenderer" as Mermaid
+participant "MarkdownReportRenderer" as Markdown
+participant "HtmlReportRenderer" as Html
+participant "PlantUmlRenderer" as Puml
+end box
+
+participant "GitLab" as GitLab
+participant "GreenNode MaaS\n(ChatModel)" as MaaS
+
+note across
+    Lõi call graph do JavaParser dựng, KHÔNG có LLM: cùng một commit luôn cho ra cùng một kết quả.
+    Hai cờ AI tách riêng vì mức rủi ro khác nhau:
+      useAi            -> LLM chỉ nhận BẢNG DỮ KIỆN (không thấy source, không thấy file:line)
+      crossCheckWithAi -> LLM nhận NGUYÊN VĂN SOURCE CODE (dữ liệu rời khỏi hạ tầng của bạn)
+    Cả hai mặc định false: không ai bị tốn token hay lộ source ngoài ý muốn.
+
+    Phần do LLM đóng góp có mặt ở đâu:
+      .md / .html -> mô tả bằng văn xuôi (useAi) + bảng đối chiếu + gợi ý lồng dưới điểm
+                     unresolved (crossCheckWithAi)
+      .puml       -> group "bước chỉ AI tìm ra" ở cuối + gợi ý trong legend (crossCheckWithAi)
+      .mmd        -> không bao giờ
+    Mọi phần do LLM đóng góp đều mang nhãn "do AI viết" hoặc "CHƯA XÁC NHẬN" tại chỗ.
+end note
+
+User -> Filter: POST /api/analyze/api-flow\n{repoUrl, branch, httpMethod, path | summary,\n useAi?, crossCheckWithAi?}
+activate Filter
+
+alt agent.api-key có cấu hình và X-API-Key sai/thiếu
+    Filter --> User: 401 Unauthorized
+else hợp lệ (hoặc api-key để trống = mở hoàn toàn)
+    Filter -> Controller: chuyển tiếp
+    deactivate Filter
+    activate Controller
+
+    == Giai đoạn 0: kiểm tra đầu vào ==
+
+    Controller -> Controller: @Valid ApiFlowRequest\nrepoUrl @NotBlank, httpMethod theo @Pattern
+    alt vi phạm bean validation
+        Controller --> User: 400 (Spring xử lý mặc định)
+    else thiếu cả path và summary
+        Controller -> Controller: throw IllegalArgumentException
+        Controller --> User: 400 {error: "Cần ít nhất một trong hai: path hoặc summary."}
+    else đủ input
+        Controller -> Analyzer: analyzeFlowWith(repoUrl, branch, httpMethod, target(),\n  useAi ? narrativeWriter : NarrativeWriter.NONE,\n  crossCheckWithAi ? flowProposer : FlowProposer.NONE)
+        activate Analyzer
+        note right of Controller
+            Controller quyết định CÓ AI hay không bằng cách chọn implementation
+            hay hằng NONE, chứ không truyền boolean xuống sâu. Nhờ vậy tầng
+            codeanalysis không cần biết LLM tồn tại.
+        end note
+
+        == Giai đoạn 1: snapshot(repoUrl, branch) — lấy source + index, có cache ==
+
+        Analyzer -> Fetcher: fetch(repoUrl, branch)
+        activate Fetcher
+
+        Fetcher -> Fetcher: requireHttpsUrl()\n- chỉ nhận https\n- TỪ CHỐI url chứa user:pass@\n- kiểm tra analysis.git.allowed-hosts
+        Fetcher -> Fetcher: resolveCredentials()\n- cleanSecret: bỏ cặp dấu nháy do cmd.exe\n- ưu tiên token (username "oauth2")\n- rồi tới username + password
+        note right of Fetcher
+            Thứ tự này quan trọng: khi tài khoản bật 2FA,
+            GitLab KHÔNG nhận password cho Git over HTTPS,
+            chỉ token dùng được.
+        end note
+
+        Fetcher -> GitLab: git ls-remote --heads (rẻ, không tải source)
+        activate GitLab
+        GitLab --> Fetcher: SHA của branch
+        deactivate GitLab
+
+        alt branch không tồn tại
+            Fetcher --> Controller: IllegalArgumentException\n+ danh sách branch đang có
+        else lỗi xác thực
+            Fetcher --> Controller: explainFailure()\n5 nguyên nhân theo tần suất + câu curl kiểm tra scope
+        else OK
+            Fetcher -> Fetcher: đọc .agent-commit-sha trong thư mục cache
+            alt SHA cache == SHA remote
+                Fetcher --> Analyzer: FetchedRepo(fromCache = true)
+                note right of Fetcher: bỏ hẳn bước clone
+            else khác nhau
+                Fetcher -> Fetcher: deleteRecursively(cacheDir)\n// chỉ trong analysis.workspace
+                Fetcher -> GitLab: clone --depth 1 --single-branch --no-tags
+                activate GitLab
+                GitLab --> Fetcher: source tại 1 commit
+                deactivate GitLab
+                Fetcher -> Fetcher: ghi .agent-commit-sha
+                Fetcher --> Analyzer: FetchedRepo(commitSha, root)
+            end
+        end
+        deactivate Fetcher
+
+        Analyzer -> Cache: get(repoUrl + "#" + branch)
+        activate Cache
+        Cache --> Analyzer: RepoSnapshot hoặc null
+        deactivate Cache
+
+        alt snapshot có sẵn và commitSha khớp
+            note right of Analyzer
+                Dùng lại index + danh sách endpoint. Parse cả repo là bước tốn nhất
+                (vài giây tới vài chục giây với monolith); endpoint thứ hai trên
+                cùng commit trả về gần như tức thì.
+            end note
+        else chưa có hoặc commit đã đổi
+            Analyzer -> Index: JavaSourceIndex.build(root, properties)
+            activate Index
+
+            Index -> Index: findSourceRoots()\ntìm mọi thư mục kết thúc bằng src/main/java
+            Index -> Index: dựng CombinedTypeSolver\n= ReflectionTypeSolver + JavaParserTypeSolver mỗi root
+            Index -> Index: collectJavaFiles()\nbỏ target/build/.git/node_modules,\ncắt tại analysis.max-source-files
+
+            loop mỗi file .java
+                Index -> Index: parse (LanguageLevel JAVA_21)
+                alt parse lỗi
+                    Index -> Index: đếm vào warnings, bỏ qua file
+                else OK
+                    Index -> Classifier: classify(type)
+                    activate Classifier
+                    Classifier -> Classifier: 1. annotation quyết định\n@RestController/@Service/@Repository/@FeignClient/@Entity
+                    Classifier -> Classifier: 2. interface extends JpaRepository... -> REPOSITORY
+                    Classifier -> Classifier: 3. record/enum -> DATA
+                    Classifier -> Classifier: 4. theo hậu tố tên\nService/Repository/Client/Mapper/Validator/Dto
+                    Classifier -> Classifier: 5. @Component chỉ là fallback cuối
+                    Classifier --> Index: ParticipantKind
+                    deactivate Classifier
+                    note right of Classifier
+                        @Component xét SAU tên lớp là có chủ ý:
+                        Mapper/Validator ngoài thực tế hầu hết là @Component,
+                        nếu xét trước thì chúng bị coi là nghiệp vụ và
+                        bị mở chi tiết, làm diagram phình vô ích.
+                    end note
+                    Index -> Index: lưu FQN -> IndexedType, và simpleName -> [IndexedType]
+                end
+            end
+
+            Index -> Index: buildImplementationMap()\ninterface FQN -> các lớp hiện thực
+            note right of Index
+                Mắt xích quyết định: Spring inject qua interface.
+                Không nối được OrderService -> OrderServiceImpl thì
+                diagram dừng ngay ở tầng service, mất hết nghiệp vụ.
+            end note
+            Index --> Analyzer: JavaSourceIndex
+            deactivate Index
+
+            Analyzer -> Scanner: EndpointScanner.scan(index)
+            activate Scanner
+            loop mỗi type có @RestController/@Controller
+                Scanner -> Scanner: lấy prefix từ @RequestMapping ở class
+                loop mỗi method
+                    Scanner -> Scanner: đọc @GetMapping/@PostMapping/...\nvà @Operation(summary)
+                    Scanner -> Scanner: joinPaths(prefix, path) -> ApiEndpoint
+                end
+            end
+            Scanner --> Analyzer: List<ApiEndpoint>
+            deactivate Scanner
+
+            Analyzer -> Cache: put(RepoSnapshot{commitSha, index, endpoints})
+        end
+
+        == Giai đoạn 2: locate() — tìm endpoint, path trước rồi mới tới mô tả ==
+
+        Analyzer -> Analyzer: endpoint.matches(httpMethod, needle)\nso từng segment, {bien} khớp mọi giá trị\n-> nhận cả /api/orders/{id} và /api/orders/42
+        alt không khớp path nào
+            Analyzer -> Analyzer: fallback: summary.toLowerCase().contains(needle)\n(khớp @Operation(summary))
+        end
+
+        alt không có endpoint nào khớp
+            Analyzer --> Controller: EndpointNotFoundException\n+ tối đa 30 endpoint gợi ý
+            Controller --> User: 404 {error: "Không có thông tin cần tìm...", suggestions}
+        else tìm thấy
+            == Giai đoạn 3: analyze() — dựng cây luồng (phần lõi, tất định) ==
+
+            Analyzer -> Builder: new CallFlowBuilder(index, properties)\n.build(endpoint, repoUrl, branch, commitSha)
+            activate Builder
+
+            Builder -> Builder: tìm controller + method vào, đăng ký participant đầu tiên
+
+            loop đệ quy: walkStatement() cho từng câu lệnh
+                Builder -> Builder: if/else -> Choice (gộp chuỗi else-if thành nhiều nhánh)
+                Builder -> Builder: switch -> Choice theo từng case
+                Builder -> Builder: for/foreach/while/do -> Loop
+                Builder -> Builder: try/catch/finally -> Guarded (giữ nhánh lỗi)
+                Builder -> Builder: throw -> Terminal(THROW)\nreturn trong nhánh -> Terminal(RETURN)
+
+                group collectCalls: trích lời gọi trong biểu thức
+                    Builder -> Builder: MethodCallExpr: xử lý scope -> đối số -> rồi mới tới chính nó\n(đúng thứ tự đánh giá thật)
+                    Builder -> Builder: VariableDeclarationExpr: PHẢI vào initializer\n(VariableDeclarator không phải Expression)
+                    Builder -> Builder: MethodReferenceExpr (this::convert), lambda,\ntoán tử ba ngôi, SwitchExpr
+                    note right of Builder
+                        Bỏ qua initializer là mất trắng mọi lời gọi được gán
+                        vào biến - tức là phần lớn luồng. Đây là bug đã từng
+                        xảy ra và bị test bắt lại.
+                    end note
+                end
+
+                group resolveTarget: lớp đích của lời gọi
+                    Builder -> Builder: không có scope / this -> chính lớp hiện tại\nsuper -> lớp cha
+                    Builder -> Builder: 1. NHÁNH CÚ PHÁP (nhanh, chính xác với Spring DI):\nbiến cục bộ -> tham số -> field (leo cả lớp cha)\n-> chữ hoa đầu = gọi static
+                    Builder -> Index: resolveTypeName(unit, tên type)\nimport -> cùng package -> wildcard -> tên duy nhất
+                    activate Index
+                    Index --> Builder: FQN
+                    deactivate Index
+                    alt FQN nằm trong repo
+                        Builder -> Builder: Target.inRepo
+                    else là hạ tầng đã biết (RestTemplate, KafkaTemplate, WebClient...)
+                        Builder -> Builder: Target.external -> vẽ ranh giới hệ thống
+                    else nằm ngoài repo (JDK, thư viện)
+                        Builder -> Builder: bỏ qua, không phải lỗ hổng đáng báo
+                    end
+                    alt nhánh cú pháp không suy được (chuỗi gọi lồng nhau, var, generic)
+                        Builder -> Builder: 2. NHÁNH SYMBOL SOLVER (chậm, chỉ dùng khi cần)\nparentCall.resolve()
+                        alt resolve thất bại
+                            Builder -> Builder: ghi vào danh sách unresolved\n(bắt cả StackOverflowError của symbol solver)
+                            note right of Builder
+                                TRỪ nhiễu Lombok: log.info(...) do @Slf4j sinh, và chuỗi
+                                X.builder().a().b() do @Builder sinh - hai thứ này KHÔNG tồn tại
+                                trong source nên solver chắc chắn gãy, mà cũng không phải bước
+                                nghiệp vụ. Đo trên repo thật: một endpoint báo 4 điểm "chưa xác
+                                định được", cả 4 đều là hai dạng này. Báo chúng lên làm tài liệu
+                                trông kém tin cậy hơn thực tế và làm loãng điểm mờ thật.
+                            end note
+                        end
+                    end
+                end
+
+                group lọc nhiễu
+                    Builder -> Builder: kind DATA -> bỏ (getter/setter của entity, DTO)
+                    Builder -> Builder: SUPPORT/UNKNOWN + tên dạng getX/setX/isX -> bỏ
+                    Builder -> Builder: nhưng SERVICE thì KHÔNG lọc\n-> getOrderById() vẫn là nghiệp vụ thật
+                    Builder -> Builder: toString/equals/builder/... -> bỏ
+                end
+
+                group interface -> implementation
+                    Builder -> Index: implementations(interfaceFqn)
+                    activate Index
+                    Index --> Builder: danh sách lớp hiện thực
+                    deactivate Index
+                    alt REPOSITORY của Spring Data
+                        Builder -> Builder: giữ nguyên interface\n(implementation do Spring sinh lúc runtime, không có source)
+                    else đúng 1 implementation
+                        Builder -> Builder: dùng nó, ghi chú "hiện thực của <Interface>"
+                    else nhiều implementation
+                        Builder -> Builder: node Unresolved + warning\nKHÔNG đoán bừa một cái rồi vẽ như thể chắc chắn
+                    end
+                end
+
+                group ghi chú cho BA
+                    Builder -> Builder: @Transactional trên method đích
+                    Builder -> Builder: @Query của repository -> hiện nguyên câu
+                    Builder -> Builder: JpaRepository<Order, Long> + @Table(name="orders")\n-> "bảng: orders"
+                end
+
+                group hàng rào chống nổ
+                    Builder -> Builder: callStack chứa method -> "đệ quy", dừng
+                    Builder -> Builder: đã expand trước đó -> "chi tiết đã mô tả ở trên"
+                    Builder -> Builder: depth > analysis.max-depth -> chỉ vẽ mũi tên + warning
+                    Builder -> Builder: hết analysis.max-nodes -> cắt + warning
+                end
+
+                Builder -> Builder: nếu được phép đi sâu:\nđệ quy vào thân method đích (depth + 1)
+            end
+
+            Builder --> Analyzer: ApiFlow{participants, cây FlowNode, unresolved, warnings}
+            deactivate Builder
+
+            Analyzer -> Summarizer: extract(flow) + summarize(flow)
+            activate Summarizer
+            Summarizer -> Summarizer: FlowFacts + bản mô tả dạng cây:\nlớp tham gia / dữ liệu bị tác động / gọi ra ngoài\n/ điều kiện rẽ nhánh / nhánh lỗi / chưa xác định
+            Summarizer --> Analyzer: FlowFacts, summary (text cho LLM đọc lại)
+            deactivate Summarizer
+
+            Analyzer -> Evidence: EvidenceCollector.collect(index, flow)
+            activate Evidence
+            Evidence -> Evidence: collectEndpoint(): điểm vào + @Operation(summary)
+            Evidence -> Evidence: collectSecurity(): @PreAuthorize/@Secured/@RolesAllowed\nkhông thấy gì -> câu hỏi IMPORTANT "API này cần quyền gì?"
+            Evidence -> Evidence: collectRequestModel(): đọc DTO của @RequestBody\n-> REQUEST_FIELD + VALIDATION cho từng annotation ràng buộc
+            note right of Evidence
+                Có ràng buộc mà tham số thiếu @Valid -> câu hỏi BLOCKING: Spring sẽ BỎ QUA
+                toàn bộ annotation validation. Đây là bug thật hay gặp, và là lý do mục
+                "dữ liệu vào" phải nằm trong tài liệu dù diagram đã lọc bỏ DTO cho gọn.
+            end note
+            Evidence -> Evidence: walk(flow.nodes()): duyệt cây đã dựng\nCall -> DATA_ACCESS / EXTERNAL_CALL / TRANSACTION\nChoice -> BRANCH, hoặc BUSINESS_RULE nếu nhánh chỉ ném lỗi\nGuarded -> ERROR_PATH, Terminal(THROW) -> thu tên exception\nUnresolved -> câu hỏi BLOCKING
+            Evidence -> Evidence: lớp SUPPORT không mở ruột trên diagram\n-> đọc thẳng AST để lấy guard clause (quy tắc nghiệp vụ hay nằm đúng đó)
+            Evidence -> Evidence: mỗi dữ kiện = 1 mã [En] + file:line thật
+
+            Evidence -> Procedures: scan(index, flow)
+            activate Procedures
+            Procedures -> Procedures: PHA 1 - nhận ra lời gọi, chỉ trong method NẰM TRONG luồng\n(kể cả lời gọi không được mở rộng)
+            Procedures -> Procedures: @Procedure / @Query nativeQuery {call ...}\n@NamedStoredProcedureQuery / annotation MyBatis
+            Procedures -> Procedures: SimpleJdbcCall: withProcedureName\n+ withCatalogName = tên package của Oracle
+            Procedures -> Procedures: prepareCall/execute: giải cả hằng số String\n-> {call PKG.PROC} và khối BEGIN ... END
+            note right of Procedures
+                Chuỗi có {} là template log của SLF4J, bỏ ngay. Và "call X" phải theo sau
+                bởi "(" / ";" / hết chuỗi: không có ràng buộc đó thì
+                log.info("Call method processEvent ...") cho ra một procedure tên METHOD.
+                Đã gặp thật trên repo Way4.
+            end note
+
+            Procedures -> Procedures: PHA 2 - đọc tham số vào/ra.\nMột procedure trong method -> quét cả method;\nnhiều -> bó vào từng câu lệnh để không gán chéo
+            Procedures -> Procedures: JPA: registerStoredProcedureParameter(vị trí, Class, ParameterMode)\n-> chiều IN/OUT/INOUT/REF_CURSOR tường minh
+            Procedures -> Procedures: Spring JDBC: declareParameters / SqlOutParameter\n/ registerOutParameter / setXxx
+            Procedures -> Procedures: setParameter(2, req.contractNumber) -> hint "contractNumber"\ncho vị trí ?2 (tên biến Java, KHÔNG phải tên trong DB)
+            Procedures -> Procedures: tách PKG.PROC thành (package, routine),\nchuẩn hoá chữ hoa như Oracle lưu
+            Procedures --> Evidence: List<StoredProcedureUse>\n{package, routine, arguments, calledIn}
+            deactivate Procedures
+            note right of Procedures
+                Không đọc được tham số thì để rỗng và tài liệu ghi "chưa đọc được", KHÔNG
+                in "()" như thể procedure không có tham số. Không xác định được package thì
+                để null thay vì đoán: tên package có thể đến từ synonym hoặc default schema
+                của user kết nối, và package sai còn tệ hơn không có package.
+            end note
+
+            Evidence -> Evidence: mỗi procedure -> 1 dẫn chứng STORED_PROCEDURE\n+ câu hỏi BLOCKING "procedure làm gì bên trong?"
+
+            Evidence -> Errors: scan(index, flow, thrownExceptions, hasValidation)
+            activate Errors
+            note right of Errors
+                Chỉ mã lỗi mà ENDPOINT NÀY đi tới được, KHÔNG phải cả bảng mã lỗi của source.
+                Bảng thật có vài chục hằng (repo Way4: 53) và hầu hết không liên quan; in hết
+                ra thì người đọc mất khả năng biết mã nào cần xử lý khi tích hợp API này.
+            end note
+            Errors -> Errors: 1. THROWN: hằng mã lỗi xuất hiện trong thân method thuộc luồng
+            Errors -> Errors: 2. VALIDATION: DTO có ràng buộc -> lấy mã từ handler\ncho MethodArgumentNotValidException
+            Errors -> Errors: 3. HANDLER: exception ném trong luồng -> tra @ExceptionHandler tương ứng
+            Errors -> Errors: 4. CATCH_ALL: @ExceptionHandler(Exception.class)
+            Errors -> Errors: đọc hằng enum theo HÌNH DẠNG đối số, không theo vị trí:\nsố -> mã, chuỗi -> thông điệp, HttpStatus.X -> mã HTTP
+            Errors --> Evidence: List<ErrorCode>{code, message, httpStatus, origin, trigger}
+            deactivate Errors
+            note right of Errors
+                Hai chỗ dễ sai, đều đã có test riêng:
+                - Nhánh validation là OVERRIDE của ResponseEntityExceptionHandler, KHÔNG có
+                  annotation nào -> phải nhận qua tên method, nếu không sẽ mất đúng mã mà
+                  mọi API có DTO đều trả về được.
+                - "BaseException".contains("Exception") là true -> khớp tên lớp phải CHÍNH XÁC,
+                  không thì handler của BaseException bị gán vào nhóm "bắt tất cả".
+            end note
+
+            Evidence -> Evidence: mỗi mã lỗi -> 1 dẫn chứng ERROR_MAPPING kèm lý do đi tới được
+            Evidence -> Evidence: collectErrorMapping(): với mỗi exception đã thu ở walk,\ntra @ResponseStatus trên exception rồi tới @ExceptionHandler\nkhông thấy gì -> câu hỏi IMPORTANT về mã HTTP trả về
+            Evidence -> Evidence: collectAnalysisLimits(): biến warnings của builder\nthành câu hỏi có ngữ cảnh
+            Evidence --> Analyzer: CodeSpec{endpoint, evidence, questions, procedures, errorCodes}
+            deactivate Evidence
+            note right of Evidence
+                Toàn bộ lớp này tất định. Model KHÔNG được tự viết file:line -
+                nếu để nó dẫn nguồn, nó sinh ra số dòng nghe rất thuyết phục
+                nhưng sai, và BA không có cách nào phát hiện.
+
+                Với hệ thống Oracle, thân procedure là tầng logic nằm NGOÀI repo Java.
+                Nêu tên procedure ra là cách duy nhất để người đọc biết tài liệu
+                còn thiếu một tầng - im lặng ở đây là kiểu sai nguy hiểm nhất.
+            end note
+
+            == Giai đoạn 4: narrate() — văn xuôi nghiệp vụ, CHỈ khi useAi=true ==
+
+            alt writer == NarrativeWriter.NONE (mặc định)
+                Analyzer -> Analyzer: narrative = null, attempts = 0\nkhông gọi model, không tốn token
+            else useAi = true
+                Analyzer -> Cache2: narration(commitSha, endpoint)
+                activate Cache2
+                Cache2 --> Analyzer: CachedNarration hoặc rỗng\n(khoá: commit + endpoint + MODEL ID; tắt bằng analysis.ai.cache=false)
+                deactivate Cache2
+                alt có trong cache
+                    Analyzer -> Citations: validate(bản cache, spec.evidence())
+                    activate Citations
+                    Citations --> Analyzer: Result
+                    deactivate Citations
+                    alt vẫn đạt truy vết
+                        Analyzer -> Analyzer: dùng lại, KHÔNG gọi model
+                        note right of Cache2
+                            Kiểm tra LẠI truy vết thay vì cache luôn kết quả kiểm tra: phép kiểm
+                            chỉ là regex nên rẻ, và nó biến cache thành thứ không thể hạ thấp
+                            chuẩn - bản cache nào không khớp được với dẫn chứng thì bị coi như
+                            chưa có cache, model sẽ được gọi lại.
+                        end note
+                    else không còn đạt
+                        Analyzer -> Analyzer: log.warn, coi như cache miss
+                    end
+                end
+                Analyzer -> Narrator: write(SpecReportRenderer.promptText(spec), feedback = null)
+                activate Narrator
+                note right of Analyzer
+                    promptText gồm ba khối, tất cả tất định:
+                      1. DỮ KIỆN [En] - chỉ phát biểu, KHÔNG có file:line
+                      2. PROCEDURE endpoint gọi - kèm lệnh cấm mô tả nội dung bên trong
+                      3. MÃ LỖI API có thể trả về - kèm lý do đi tới được, cấm nghĩ thêm mã mới
+                    Khối 2 và 3 cần thiết: không có chúng, model sẽ mô tả lời gọi DAO như thể đó
+                    là điểm cuối của luồng, và không nói được API trả về mã lỗi nào.
+                end note
+                Narrator -> MaaS: ChatModel.call(system + bảng dữ kiện [En])
+                activate MaaS
+                note right of Narrator
+                    Gọi thẳng ChatModel, KHÔNG qua ChatClient của agent:
+                    ở đây không cần bộ nhớ hội thoại và không nên có tool nào.
+                    Model chỉ thấy danh sách dữ kiện - không source, không file:line.
+                end note
+                MaaS --> Narrator: bản nháp (2 mục: "Hệ thống đang làm gì" / "Suy luận")
+                deactivate MaaS
+                Narrator --> Analyzer: draft
+                deactivate Narrator
+
+                alt gọi model ném RuntimeException
+                    Analyzer -> Analyzer: safeWrite() bắt lỗi -> draft = null\n+ describeLlmFailure(): OpenAIIoException => DNS/proxy/timeout
+                    note right of Analyzer: Lỗi LLM KHÔNG được làm sập request —\nphần tất định vẫn phải trả về được.
+                end
+
+                Analyzer -> Citations: validate(draft, spec.evidence())
+                activate Citations
+                Citations -> Citations: bắt mã [En] không tồn tại -> invalidIds\nbắt chuỗi Abc.java:42 model tự gõ -> handWritten
+                Citations --> Analyzer: Result{trustworthy = invalidIds.isEmpty() && handWritten.isEmpty()}
+                deactivate Citations
+
+                alt trustworthy
+                    Analyzer -> Analyzer: giữ mô tả, aiNote(1)
+                    Analyzer -> Cache2: putNarration(...)\nCHỈ cache bản đã được nhận
+                else không đạt truy vết
+                    Analyzer -> Narrator: write(promptText, feedback = citations.describe())
+                    activate Narrator
+                    Narrator -> MaaS: ChatModel.call(+ đúng lỗi của lần trước)
+                    activate MaaS
+                    MaaS --> Narrator: bản viết lại
+                    deactivate MaaS
+                    Narrator --> Analyzer: retry
+                    deactivate Narrator
+                    Analyzer -> Citations: validate(retry, evidence)
+                    activate Citations
+                    Citations --> Analyzer: Result lần 2
+                    deactivate Citations
+                    alt lần 2 đạt
+                        Analyzer -> Analyzer: giữ mô tả, aiNote(2)
+                    else lần 2 vẫn không đạt                        Analyzer -> Analyzer: LOẠI BỎ phần mô tả\ngiữ rejectedDraft cho developer soi + rejectionNote\nKHÔNG cache bản bị loại
+                        note right of Analyzer
+                            Thà bỏ hẳn phần văn xuôi còn hơn đưa vào kèm cảnh báo:
+                            người đọc là BA, họ không đối chiếu được dẫn chứng, nên
+                            một đoạn văn trôi chảy có trích dẫn bịa sẽ được tin ngay.
+                            Phần dữ kiện tất định vẫn dùng bình thường.
+                        end note
+                    end
+                end
+            end
+
+            == Giai đoạn 5: crossCheck() — đối chiếu chéo, CHỈ khi crossCheckWithAi=true ==
+
+            alt proposer == FlowProposer.NONE (mặc định)
+                Analyzer -> Analyzer: comparison = FlowComparison.notRun()\nsource code KHÔNG rời khỏi hạ tầng
+            else crossCheckWithAi = true
+                Analyzer -> Cache2: comparison(commitSha, endpoint)
+                activate Cache2
+                Cache2 --> Analyzer: FlowComparison hoặc rỗng\n(khoá thêm max-source-chars)
+                deactivate Cache2
+                alt có trong cache
+                    Analyzer -> Analyzer: dùng lại - KHÔNG gọi model, và quan trọng hơn:\nKHÔNG gửi lại source code ra ngoài hạ tầng
+                else chưa có
+                Analyzer -> Bundle: build(index, flow, analysis.ai.max-source-chars = 40000)
+                activate Bundle
+                Bundle -> Bundle: gom NGUYÊN VĂN thân method trong luồng\n+ khai báo field của lớp
+                Bundle --> Analyzer: sourceBundle
+                deactivate Bundle
+
+                Analyzer -> Proposer: propose(sourceBundle, endpoint.label())
+                activate Proposer
+                Proposer -> Proposer: log.warn "GỬI SOURCE CODE tới nhà cung cấp model"
+                Proposer -> MaaS: ChatModel.call(system yêu cầu định dạng\n"STEP Caller.method -> Callee.method | ghi chú")
+                activate MaaS
+                MaaS --> Proposer: call graph do LLM tự dựng
+                deactivate MaaS
+                Proposer --> Analyzer: proposal
+                deactivate Proposer
+                note right of Proposer
+                    LLM cố tình KHÔNG được xem kết quả của parser: thấy trước thì nó
+                    chỉ xác nhận lại parser và bước đối chiếu mất hết giá trị.
+                    Hai bên phải độc lập rồi mới so.
+                end note
+
+                alt gọi LLM thất bại
+                    Analyzer -> Analyzer: bắt RuntimeException -> FlowComparison.notRun()\nKHÔNG cache: lỗi mạng không phải kết quả để dùng lại
+                else có đề xuất
+                    Analyzer -> Comparator: compare(flow, proposal)
+                    activate Comparator
+                    Comparator -> Comparator: parserSteps(flow): duyệt cây FlowNode\n(Call/Choice/Loop/Guarded), gộp cặp gọi trùng
+                    Comparator -> Comparator: parse(proposal) theo regex STEP;\ndòng "STEP" sai cú pháp -> đếm vào malformed + warn
+                    Comparator -> Comparator: rút bản đồ interface -> impl từ ghi chú\n"hiện thực của X" mà parser đã gắn lên node Call
+                    note right of Comparator
+                        Bắt buộc, vì Step.key() tự nó chỉ bỏ được hậu tố "Impl" - chỉ đúng khi
+                        impl đặt tên đúng khuôn <Interface>Impl. Code thật hay chèn chữ vào giữa:
+                        EnrollC2PMasterCardServiceImpl hiện thực EnrollC2PService. Khi đó LLM ghi
+                        tên interface, parser ghi tên impl, và CÙNG MỘT BƯỚC bị đẩy vào cả hai
+                        bảng "chỉ AI" và "chỉ parser" -> đồng thuận tụt từ 100% xuống 67%.
+
+                        Đây KHÔNG phải rò rỉ kết quả parser sang LLM: bản đồ chỉ dùng lúc so,
+                        sau khi LLM đã trả lời xong. Nhiều implementation thì parser không kết
+                        luận -> không có alias -> bất đồng được giữ, vì lúc đó nó là bất đồng THẬT.
+                    end note
+                    Comparator -> Comparator: so theo key đã chuẩn hoá\n-> agreed / onlyParser / onlyAi\n+ giữ phần văn xuôi LLM giải thích chỗ không chắc
+                    Comparator --> Analyzer: FlowComparison{agreementPercent, ...}
+                    deactivate Comparator
+                    Analyzer -> Cache2: putComparison(...)\nchỉ khi aiResponded = true
+                end
+                end
+            end
+
+            == Giai đoạn 6: kết xuất 4 định dạng từ CÙNG một cây FlowNode ==
+
+            Analyzer -> Mermaid: render(flow)
+            activate Mermaid
+            Mermaid --> Analyzer: mermaid (GitLab tự render)
+            deactivate Mermaid
+
+            Analyzer -> Markdown: render(flow, mermaid, facts, spec,\n  narrative, aiNote, comparison)
+            activate Markdown
+            Markdown -> Markdown: mục "Procedure và package database":\nbảng Package | Procedure | Input | Output | Gọi từ | Cách gọi
+            Markdown -> Markdown: mục "Mã lỗi API này có thể trả về":\nnhóm theo đường đi tới (ném tường minh / validation / handler / bắt tất cả)
+            Markdown -> Linker: candidatesFor(mỗi điểm unresolved, comparison)
+            activate Linker
+            Linker -> Linker: ghép theo tên method: unresolved chỉ lưu nguyên văn\nbiểu thức gọi, AI cho cặp lớp-method
+            Linker --> Markdown: bước AI có thể là câu trả lời cho điểm đó
+            deactivate Linker
+            Markdown -> Markdown: lồng gợi ý NGAY DƯỚI điểm unresolved\n"AI đề xuất (CHƯA XÁC NHẬN): ..."
+            Markdown -> Markdown: footer nói đúng nguồn gốc theo narrative/aiNote/comparison
+            Markdown --> Analyzer: markdown (dán vào wiki/MR)
+            deactivate Markdown
+            note right of Linker
+                Hai mục "chưa xác định được" và "bước chỉ AI tìm ra" có CÙNG nguyên nhân gốc:
+                thiếu jar dependency nên symbol solver gãy, còn LLM đọc source thì vẫn đoán ra.
+                Trước đây chúng nằm rời nhau và không ai tự đối chiếu.
+
+                Ba lớp chống ghép bừa: phải có ".method(" trong biểu thức (nên "verifyResult"
+                không khớp "verify"), tên method ngắn hơn 3 ký tự bị loại, tối đa 3 ứng viên
+                mỗi điểm. Nhãn luôn mang chữ CHƯA XÁC NHẬN.
+            end note
+
+            Analyzer -> Html: render(flow, facts, spec, narrative, aiNote, comparison)
+            activate Html
+            Html -> Html: cùng ba mục như markdown; gợi ý của AI thành <ul> lồng,\nclass ai-hint để phân biệt bằng mắt
+            Html --> Analyzer: html (BA mở bằng browser, không cần cài gì)
+            deactivate Html
+
+            Analyzer -> Puml: render(flow, spec, comparison,\n  analysis.database.show-in-diagram)
+            activate Puml
+            Puml -> Puml: participant theo vai: REPOSITORY -> database,\nKafka/Rabbit -> queue, database thành participant riêng
+            Puml -> Puml: Choice -> alt/else, Loop -> loop,\nGuarded -> alt "luồng bình thường"/else "lỗi X"
+            Puml -> Puml: Terminal(THROW) -> note đỏ;\nnote đầu diagram: repo + branch + commit + file:line
+            Puml -> Puml: mũi tên repository -> database chỉ mang TÊN NGẮN procedure;\nchữ ký đầy đủ vẽ thành BẢNG creole trong note (# | chiều | tên | kiểu)
+            note right of Puml
+                Nhồi cả package và danh sách tham số vào nhãn cho ra một dòng như
+                "procedure CARDAPP.MSB_CTP.PRC_VALIDATEINFOTOCTP(?1 (cardId): Integer, ...)
+                -> ?4: REF_CURSOR, ?5: String" - dài, khó dò vị trí nào vào vị trí nào ra,
+                và PlantUML bẻ dòng ở chỗ vô nghĩa. Bảng bốn cột thì mắt đọc theo hàng.
+                Mũi tên trả về chỉ nêu SỐ LƯỢNG tham số ra, chi tiết đã có trong bảng.
+            end note
+            alt comparison.onlyByAi() không rỗng
+                Puml -> Puml: group cuối: mũi tên NÉT ĐỨT "(?) m() [chưa xác nhận]"\n+ participant riêng <<chưa xác nhận>> cho lớp chỉ AI nêu
+                note right of Puml
+                    Đây là chỗ DUY NHẤT trong .puml có đóng góp của LLM, và chỉ khi bật
+                    crossCheckWithAi. Đánh đổi có ý thức: diagram trộn hai mức độ tin cậy.
+                    Bù lại bằng ba lớp phân biệt - group riêng ở CUỐI (không cắt ngang trình
+                    tự thật), nét đứt, và nhãn "chưa xác nhận" trên từng mũi tên.
+                    Thứ tự trong group KHÔNG phải thứ tự thực thi: bảng đối chiếu so theo
+                    tập hợp nên đã mất thông tin thứ tự.
+                end note
+            end
+            Puml -> Linker: candidatesFor(mỗi điểm unresolved, comparison)
+            activate Linker
+            Linker --> Puml: ứng viên cho từng điểm
+            deactivate Linker
+            Puml -> Puml: legend: procedure/package (n vào / n ra), bước chỉ AI tìm ra,\nunresolved + gợi ý của AI lồng ngay dưới, giới hạn phân tích
+            note right of Puml
+                Legend là phần quan trọng nhất về mặt tin cậy:
+                diagram thà thiếu và nói rõ là thiếu, còn hơn
+                liền mạch nhưng bịa.
+            end note
+            Puml --> Analyzer: nội dung .puml
+            deactivate Puml
+
+            loop mỗi định dạng: html, md, mmd, puml
+                Analyzer -> Analyzer: write(baseName + ext, content)\nbaseName = <method-path>__<sha8>,\ndir = analysis.output-dir (mặc định /tmp/agent-code-analysis/diagrams)
+                alt ghi thất bại (IOException)
+                    Analyzer -> Analyzer: log.warn, Rendered.file = null\nlần phân tích VẪN thành công, chỉ mất file
+                end
+            end
+            note right of Analyzer
+                Rendered.filePath() luôn trả đường dẫn dấu "/" kể cả trên Windows: trong JSON
+                mỗi "\" bị escape thành "\\" nên C:\Users\...\Temp\... dán vào Explorer không
+                chạy. Cùng quy ước với sourceFile do JavaSourceIndex chuẩn hoá.
+                Đây là đường dẫn trên MÁY CHẠY SERVER - khi agent chạy trên GreenNode/Docker
+                thì nó vô nghĩa với client, dùng formats.*.content thay vì đi tìm file.
+            end note
+
+            Analyzer --> Controller: AnalysisResult{flow, summary,\n  html/markdown/mermaid/puml, comparison, aiUsed, aiNote}
+            deactivate Analyzer
+
+            Controller -> Controller: log "<-- POST ... {ms} endpoint= participants= AI= đối chiếu="
+            Controller --> User: 200 ApiFlowResponse\n{endpoint, commitSha, participants, summary,\n formats{html,markdown,mermaid,puml}.{content,file},\n aiUsed, aiNote, comparison, unresolved, warnings}
+            deactivate Controller
+        end
+    end
+end
+
+note across
+    Ba đường khác vào cùng cỗ máy này:
+
+    1. GET /api/analyze/api-flow.html | .md  -> analyzeByPath/analyzeBySummary, truyền cứng
+       NarrativeWriter.NONE + FlowProposer.NONE: hai đường GET này KHÔNG BAO GIỜ gọi LLM.
+       Dán được vào thanh địa chỉ, nhưng khi agent.api-key có cấu hình thì browser không gửi được
+       header X-API-Key -> chia sẻ file .html đã ghi sẵn, đừng chia sẻ link.
+
+    2. POST /api/analyze/spec[.html] -> specWith(...) dùng lại đúng snapshot/CallFlowBuilder/
+       EvidenceCollector/narrate/crossCheck ở trên, nên cũng có mục procedure và mục mã lỗi.
+       Chỉ khác bước kết xuất (SpecReportRenderer) và ghi file với hậu tố __spec.
+       SpecReportRenderer cũng là nơi dựng promptText cho model, nên hai đường không thể lệch
+       nhau về những gì model được biết.
+
+    3. POST /api/chat -> AgentService -> ChatClient -> GreenNode MaaS. Model gọi tool
+       CodeAnalysisTools, tool gọi đúng ApiFlowAnalyzer này. Model CHỈ diễn giải kết quả tool;
+       call graph vẫn do phân tích tĩnh dựng. System prompt cấm model tự suy luồng gọi từ kiến
+       thức chung về Spring - đó chính là chỗ model hay bịa ra method không tồn tại.
+end note
+
+@enduml

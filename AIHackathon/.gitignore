@@ -1,0 +1,45 @@
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### Secrets — KHÔNG commit ###
+# Spring Boot tự nạp ./config/application.yml khi chạy từ thư mục project.
+# Để LLM_API_KEY / AGENT_API_KEY ở đó cho tiện dev mà không lọt vào git.
+#
+# PHẢI có "/" ở đầu để pattern chỉ khớp thư mục config Ở GỐC PROJECT.
+# Nếu viết "config/" (không có "/" đầu), git hiểu là "mọi thư mục tên config ở mọi cấp"
+# -> nó ăn luôn src/main/java/com/example/aihackathon/config/, tức là AgentConfig và
+# LlmStartupCheck không vào git, và ai clone repo về sẽ không build được.
+/config/
+*.env
+.env
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/

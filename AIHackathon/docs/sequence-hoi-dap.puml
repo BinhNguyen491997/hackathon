@@ -1,0 +1,145 @@
+@startuml sequence-hoi-dap
+title Work Agent - luồng một lượt hỏi đáp có gọi tool (Spring AI 2.x + GreenNode MaaS)
+
+autonumber "<b>[0]"
+skinparam responseMessageBelowArrow true
+
+actor "Người dùng" as User
+
+box "Máy cá nhân" #FDF6E3
+participant "client/agent.ps1" as Client
+end box
+
+box "GreenNode - vai 2: nơi agent chạy\n(AgentBase / Cloud Server)" #E8F4FD
+participant "ApiKeyFilter" as Filter
+participant "ChatController" as Controller
+participant "AgentService" as Service
+participant "ChatClient\n(Spring AI)" as ChatClient
+participant "MessageChatMemoryAdvisor" as MemAdvisor
+participant "SummarizingChatMemory" as Memory
+participant "ChatModelSummarizer" as Summarizer
+participant "ToolCallingAdvisor\n+ ToolCallingManager" as ToolLoop
+participant "WorkTools\n+ TaskStore" as Tools
+end box
+
+box "GreenNode - vai 1: bộ não\n(MaaS, API chuẩn OpenAI)" #E8FDE8
+participant "Model ngôn ngữ\nz-ai/glm-5.2-hackathon" as LLM
+end box
+
+note over Service, Memory
+    Lúc khởi động, LlmStartupCheck kiểm tra cấu hình LLM và fail fast nếu:
+    base-url thiếu "/v1" (SDK nối "chat/completions" vào sau) hoặc api-key trống.
+end note
+
+User -> Client: gõ "tạo task viết slide,\nhạn 2026-09-12, ưu tiên cao"
+activate Client
+
+Client -> Filter: POST /api/chat\nheader X-API-Key\nbody {conversationId, message}
+activate Filter
+
+alt thiếu hoặc sai X-API-Key
+    Filter --> Client: 401 Unauthorized
+    note right of Filter
+        Nếu AGENT_API_KEY để trống thì
+        filter cho qua tất cả -> chỉ dùng localhost
+    end note
+else đúng X-API-Key
+    Filter -> Controller: chuyển tiếp request
+    deactivate Filter
+    activate Controller
+
+    Controller -> Controller: validate message\nsinh conversationId nếu client không gửi
+    Controller -> Service: ask(conversationId, message)
+    activate Service
+
+    Service -> ChatClient: prompt(message)\n+ param CONVERSATION_ID\n+ toolContext{owner = conversationId}
+    activate ChatClient
+    note right of Service
+        owner đi qua ToolContext, KHÔNG gửi cho model
+        -> model không thể tự đổi để đọc dữ liệu người khác
+    end note
+
+    ChatClient -> MemAdvisor: before()
+    activate MemAdvisor
+
+    MemAdvisor -> Memory: get(conversationId)
+    activate Memory
+    Memory --> MemAdvisor: history (có thể gồm\n1 message "[Bối cảnh đã tóm tắt...]")
+    MemAdvisor -> Memory: add(câu hỏi mới)\n// lưu TRƯỚC khi gọi model
+
+    opt số message > agent.memory.window
+        Memory -> Memory: cắt tại ranh giới lượt USER,\ngiữ lại agent.memory.keep-recent message
+        Memory -> Summarizer: summarize(phần cũ)
+        activate Summarizer
+        Summarizer -> LLM: POST /v1/chat/completions\n{prompt "bộ nén ngữ cảnh" + transcript}\n// request riêng, KHÔNG kèm tools
+        activate LLM
+        LLM --> Summarizer: bản tóm tắt (<= summary-max-words)
+        deactivate LLM
+        Summarizer --> Memory: text tóm tắt
+        deactivate Summarizer
+        Memory -> Memory: thay phần cũ bằng 1 UserMessage tóm tắt\n// lỗi tóm tắt -> rơi về cắt cửa sổ
+    end
+    deactivate Memory
+
+    MemAdvisor -> ToolLoop: chuyển tiếp prompt\n(system prompt được đưa lên đầu)
+    activate ToolLoop
+    note over MemAdvisor, ToolLoop
+        Order: memory advisor (+200) < tool calling advisor (+300)
+        -> bộ nhớ nằm NGOÀI vòng lặp tool: đọc/ghi 1 lần cho cả lượt
+    end note
+
+    group Vòng lặp tool calling (lặp tới khi model không gọi tool nữa)
+        ToolLoop -> LLM: POST /v1/chat/completions\nmessages: system + history + câu hỏi\nmodel, temperature, top_p, max_tokens\ntools: 5 JSON schema từ @Tool
+        activate LLM
+        LLM --> ToolLoop: finish_reason "tool_calls"\ntool_calls[0] = createTask(arguments JSON)
+        deactivate LLM
+        note left of LLM
+            Model chỉ ĐỀ NGHỊ gọi tool: nó trả về text JSON.
+            Nó không chạy code và không có đường mạng
+            tới service này.
+        end note
+
+        ToolLoop -> Tools: invoke createTask(...)\n+ ToolContext{owner}
+        activate Tools
+        Tools -> Tools: lưu task vào TaskStore\ntheo đúng owner
+        Tools --> ToolLoop: 'Đã tạo task #1 "viết slide"\n[HIGH/OPEN] hạn 2026-09-12'
+        deactivate Tools
+
+        ToolLoop -> LLM: request kế tiếp = messages cũ\n+ assistant{tool_calls}\n+ tool{tool_call_id, kết quả}
+        activate LLM
+        LLM --> ToolLoop: finish_reason "stop"\ncontent + reasoning_content
+        deactivate LLM
+    end
+
+    ToolLoop --> MemAdvisor: response
+    deactivate ToolLoop
+
+    MemAdvisor -> Memory: after(): add(câu trả lời)
+    activate Memory
+    Memory -> Memory: BỎ metadata reasoningContent\n// nếu giữ, Spring AI sẽ gửi lại\n// reasoning_content ở mọi lượt sau
+    deactivate Memory
+    deactivate MemAdvisor
+
+    ChatClient --> Service: nội dung trả lời (text)
+    deactivate ChatClient
+
+    Service --> Controller: text
+    deactivate Service
+    Controller --> Client: 200 {conversationId, reply}
+    deactivate Controller
+end
+
+Client --> User: in câu trả lời ra màn hình
+deactivate Client
+
+note across
+    Lượt hỏi tiếp theo: client gửi lại ĐÚNG conversationId đó
+    -> SummarizingChatMemory nạp lại ngữ cảnh nên agent "nhớ" được cuộc hội thoại.
+    Đổi conversationId = bắt đầu hội thoại mới.
+
+    API chat/completions là stateless: mỗi lượt phải gửi lại lịch sử.
+    Hai cơ chế giảm token: strip reasoning_content + nén phần cũ thành 1 tóm tắt.
+    System prompt và tools cố định ở đầu prompt -> prefix ổn định cho prompt cache của MaaS.
+end note
+
+@enduml
