@@ -153,7 +153,14 @@ final class SpecReportRenderer {
 
     static String html(ApiFlow flow, CodeSpec spec, String narrative, String aiNote,
             FlowComparison comparison) {
+        return html(flow, spec, narrative, aiNote, comparison, null);
+    }
 
+    /**
+     * @param puml mã PlantUML để nhúng vào trang; null/blank thì bỏ qua mục sơ đồ
+     */
+    static String html(ApiFlow flow, CodeSpec spec, String narrative, String aiNote,
+            FlowComparison comparison, String puml) {
         StringBuilder out = new StringBuilder(12288);
         String title = "Đặc tả chức năng hiện trạng: " + flow.endpoint().label();
 
@@ -196,11 +203,13 @@ final class SpecReportRenderer {
 
         AiSectionRenderer.appendEvidenceHtml(out, spec);
 
+        PlantUmlSection.appendHtml(out, flow, puml);
+
         AiSectionRenderer.appendComparisonHtml(out, comparison);
 
         out.append("<footer>Dẫn chứng và danh sách câu hỏi được sinh tất định bằng phân tích tĩnh "
-                + "(JavaParser). Vị trí file:line do parser cung cấp.<br>"
-                + "Sơ đồ tuần tự nằm ở file .puml đi kèm - mở bằng plugin PlantUML.</footer>\n");
+                + "(JavaParser). Vị trí file:line do parser cung cấp.<br>")
+                .append(esc(PlantUmlSection.footerNote(puml))).append("</footer>\n");
         out.append("</body>\n</html>\n");
         return out.toString();
     }
@@ -278,8 +287,9 @@ final class SpecReportRenderer {
                   tr:target { background:#fff6d6; }
                   footer { margin-top:44px; padding-top:12px; border-top:1px solid var(--line);
                            color:var(--muted); font-size:13px; }
-                </style>
                 """);
+        out.append(PlantUmlSection.styles());
+        out.append("</style>\n");
     }
 
     private static void row(StringBuilder out, String key, String valueHtml) {

@@ -260,8 +260,12 @@ public class ApiFlowAnalyzer {
         String mermaid = MermaidRenderer.render(flow);
         String markdown = SpecReportRenderer.markdown(flow, spec, mermaid, narration.narrative(),
                 narration.aiNote(), comparison);
+        // Tài liệu đặc tả không ghi ra file .puml riêng, nên mã sơ đồ phải nằm ngay trong HTML -
+        // trước đây footer chỉ trỏ tới "file .puml đi kèm" mà luồng này không hề sinh file đó.
+        String puml = PlantUmlRenderer.render(flow, spec, comparison,
+                this.properties.getDatabase().isShowInDiagram());
         String html = SpecReportRenderer.html(flow, spec, narration.narrative(),
-                narration.aiNote(), comparison);
+                narration.aiNote(), comparison, puml);
 
         String baseName = baseName(endpoint, snapshot.commitSha()) + "__spec";
         log.info("sinh đặc tả {} | {} dẫn chứng | {} câu hỏi | AI={} ({} lượt) | đối chiếu={} "
@@ -487,10 +491,12 @@ public class ApiFlowAnalyzer {
         String mermaid = MermaidRenderer.render(flow);
         String markdown = MarkdownReportRenderer.render(flow, mermaid, facts, spec,
                 narration.narrative(), narration.aiNote(), comparison);
-        String html = HtmlReportRenderer.render(flow, facts, spec,
-                narration.narrative(), narration.aiNote(), comparison);
+        // Sinh .puml TRƯỚC html: báo cáo HTML nhúng nguyên văn mã sơ đồ vào trang, nên hai định
+        // dạng này không thể lệch nội dung.
         String puml = PlantUmlRenderer.render(flow, spec, comparison,
                 this.properties.getDatabase().isShowInDiagram());
+        String html = HtmlReportRenderer.render(flow, facts, spec,
+                narration.narrative(), narration.aiNote(), comparison, puml);
 
         String baseName = baseName(endpoint, snapshot.commitSha());
         AnalysisResult result = new AnalysisResult(flow, summary,

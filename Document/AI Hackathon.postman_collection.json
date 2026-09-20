@@ -1,0 +1,266 @@
+{
+  "info": {
+    "_postman_id": "bda25ecb-6404-4cd6-b8df-cf3d13c68cea",
+    "name": "AI Hackathon",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "33738412"
+  },
+  "item": [
+    {
+      "name": "Green Node",
+      "item": [
+        {
+          "name": "Test call",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer $AI_PLATFORM_API_KEY"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"z-ai/glm-5.2-hackathon\",\n  \"messages\": [\n    {\n      \"role\": \"assistant\",\n      \"content\": \"You are an AI assistant tasked with providing information to users.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"What is AI?\"\n    }\n  ],\n  \"max_tokens\": 4096,\n  \"temperature\": 1,\n  \"top_p\": 0.95\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "https://maas-llm-aiplatform-hcm.api.vngcloud.vn/v1/chat/completions",
+              "protocol": "https",
+              "host": [
+                "maas-llm-aiplatform-hcm",
+                "api",
+                "vngcloud",
+                "vn"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "CodeGenURD",
+      "item": [
+        {
+          "name": "Service Java",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "secret123"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"conversationId\": \"conv-demo\",\n    \"message\": \"Liệt kê task của tôi\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://localhost:8080/api/chat",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "api",
+                "chat"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "https://gitlab.com/api/v4/personal_access_tokens/self",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "PRIVATE-TOKEN",
+                "value": "glpat-cmTO7KwRRBrW4jHeKhuvDGM6MQpvOjEKdTozamNldQ8.01.1712p1jwq"
+              }
+            ],
+            "url": {
+              "raw": "https://gitlab.com/api/v4/personal_access_tokens/self",
+              "protocol": "https",
+              "host": [
+                "gitlab",
+                "com"
+              ],
+              "path": [
+                "api",
+                "v4",
+                "personal_access_tokens",
+                "self"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Call gen file Git Cty",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"repoUrl\": \"https://gitlab.com/thanhbinh491997/design-pattern-service\",\r\n    \"branch\": \"adapter_pattern\",\r\n    \"httpMethod\": \"POST\",\r\n    \"path\": \"/api/c2p/enroll\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://localhost:8080/api/analyze/api-flow",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "api",
+                "analyze",
+                "api-flow"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Code gen file git public",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"repoUrl\": \"https://gitlab.com/thanhbinh491997/reservation.git\",\r\n    \"branch\": \"master\",\r\n    \"httpMethod\": \"POST\",\r\n    \"path\": \"/api/reservations/simple\",\r\n    \"useAi\": true,\r\n    \"crossCheckWithAi\": true\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://localhost:8080/api/analyze/api-flow",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "api",
+                "analyze",
+                "api-flow"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Code gen puml git public",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"repoUrl\": \"https://gitlab.com/thanhbinh491997/reservation.git\",\r\n    \"branch\": \"master\",\r\n    \"httpMethod\": \"POST\",\r\n    \"path\": \"/api/reservations/simple\",\r\n    \"useAi\": true,\r\n    \"crossCheckWithAi\": true\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://localhost:8080/api/analyze/api-flow.puml",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "api",
+                "analyze",
+                "api-flow.puml"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Code gen html git public Copy",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"repoUrl\": \"https://gitlab.com/thanhbinh491997/reservation.git\",\r\n    \"branch\": \"master\",\r\n    \"httpMethod\": \"POST\",\r\n    \"path\": \"/api/reservations/simple\",\r\n    \"useAi\": true,\r\n    \"crossCheckWithAi\": true\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://localhost:8080/api/analyze/spec.html",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8080",
+              "path": [
+                "api",
+                "analyze",
+                "spec.html"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
