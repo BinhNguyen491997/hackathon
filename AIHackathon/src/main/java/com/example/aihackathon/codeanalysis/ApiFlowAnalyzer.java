@@ -106,7 +106,19 @@ public class ApiFlowAnalyzer {
     public AnalysisResult analyzeFlowWith(String repoUrl, String branch, String httpMethod,
             String pathOrKeyword, NarrativeWriter writer, FlowProposer proposer) {
 
-        RepoSnapshot snapshot = snapshot(repoUrl, branch);
+        return analyzeFlowWith(repoUrl, branch, httpMethod, pathOrKeyword, writer, proposer, null);
+    }
+
+    /**
+     * Như trên, nhưng dùng token GitLab của người gọi.
+     *
+     * @param gitToken token lấy từ request; null/blank thì dùng cấu hình server. Chỉ được đi
+     *                 xuống {@link GitRepoFetcher}, không log và không đưa vào kết quả.
+     */
+    public AnalysisResult analyzeFlowWith(String repoUrl, String branch, String httpMethod,
+            String pathOrKeyword, NarrativeWriter writer, FlowProposer proposer, String gitToken) {
+
+        RepoSnapshot snapshot = snapshot(repoUrl, branch, gitToken);
         ApiEndpoint endpoint = locate(snapshot, httpMethod, pathOrKeyword);
         return analyze(endpoint, snapshot, repoUrl, branch, writer, proposer);
     }
@@ -174,7 +186,12 @@ public class ApiFlowAnalyzer {
     }
 
     public List<ApiEndpoint> endpoints(String repoUrl, String branch) {
-        return snapshot(repoUrl, branch).endpoints();
+        return endpoints(repoUrl, branch, null);
+    }
+
+    /** @param gitToken token GitLab của người gọi; null/blank thì dùng cấu hình server */
+    public List<ApiEndpoint> endpoints(String repoUrl, String branch, String gitToken) {
+        return snapshot(repoUrl, branch, gitToken).endpoints();
     }
 
     /**
@@ -211,8 +228,15 @@ public class ApiFlowAnalyzer {
     public SpecResult collectSpec(String repoUrl, String branch, String httpMethod,
             String pathOrSummary) {
 
+        return collectSpec(repoUrl, branch, httpMethod, pathOrSummary, null);
+    }
+
+    /** @param gitToken token GitLab của người gọi; null/blank thì dùng cấu hình server */
+    public SpecResult collectSpec(String repoUrl, String branch, String httpMethod,
+            String pathOrSummary, String gitToken) {
+
         return buildSpec(repoUrl, branch, httpMethod, pathOrSummary, NarrativeWriter.NONE,
-                FlowProposer.NONE);
+                FlowProposer.NONE, gitToken);
     }
 
     /**
@@ -226,7 +250,7 @@ public class ApiFlowAnalyzer {
             String pathOrSummary, String narrative) {
 
         return buildSpec(repoUrl, branch, httpMethod, pathOrSummary,
-                (promptText, feedback) -> narrative, FlowProposer.NONE);
+                (promptText, feedback) -> narrative, FlowProposer.NONE, null);
     }
 
     /**
@@ -240,13 +264,20 @@ public class ApiFlowAnalyzer {
     public SpecResult specWith(String repoUrl, String branch, String httpMethod,
             String pathOrSummary, NarrativeWriter writer, FlowProposer proposer) {
 
-        return buildSpec(repoUrl, branch, httpMethod, pathOrSummary, writer, proposer);
+        return buildSpec(repoUrl, branch, httpMethod, pathOrSummary, writer, proposer, null);
+    }
+
+    /** @param gitToken token GitLab của người gọi; null/blank thì dùng cấu hình server */
+    public SpecResult specWith(String repoUrl, String branch, String httpMethod,
+            String pathOrSummary, NarrativeWriter writer, FlowProposer proposer, String gitToken) {
+
+        return buildSpec(repoUrl, branch, httpMethod, pathOrSummary, writer, proposer, gitToken);
     }
 
     private SpecResult buildSpec(String repoUrl, String branch, String httpMethod,
-            String pathOrSummary, NarrativeWriter writer, FlowProposer proposer) {
+            String pathOrSummary, NarrativeWriter writer, FlowProposer proposer, String gitToken) {
 
-        RepoSnapshot snapshot = snapshot(repoUrl, branch);
+        RepoSnapshot snapshot = snapshot(repoUrl, branch, gitToken);
         ApiEndpoint endpoint = locate(snapshot, httpMethod, pathOrSummary);
 
         ApiFlow flow = new CallFlowBuilder(snapshot.index(), this.properties)
@@ -515,7 +546,18 @@ public class ApiFlowAnalyzer {
     }
 
     private RepoSnapshot snapshot(String repoUrl, String branch) {
-        GitRepoFetcher.FetchedRepo repo = this.fetcher.fetch(repoUrl, branch);
+        return snapshot(repoUrl, branch, null);
+    }
+
+    /**
+     * Bản chụp source của repo, dùng lại khi commit không đổi.
+     *
+     * <p>Khoá cache KHÔNG chứa token, và cũng không cần: {@code fetch} luôn chạy {@code ls-remote}
+     * bằng credential của người gọi trước khi tới đây, nên người không có quyền không đọc được
+     * bản chụp do người khác tạo - họ trượt ngay ở bước hỏi GitLab.
+     */
+    private RepoSnapshot snapshot(String repoUrl, String branch, String gitToken) {
+        GitRepoFetcher.FetchedRepo repo = this.fetcher.fetch(repoUrl, branch, gitToken);
         String key = repo.repoUrl() + "#" + repo.branch();
 
         RepoSnapshot cached = this.snapshots.get(key);

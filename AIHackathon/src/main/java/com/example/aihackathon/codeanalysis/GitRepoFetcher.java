@@ -71,12 +71,24 @@ public class GitRepoFetcher {
      * @param branch  branch cần đọc; null/blank thì lấy analysis.git.default-branch
      */
     public FetchedRepo fetch(String repoUrl, String branch) {
+        return fetch(repoUrl, branch, null);
+    }
+
+    /**
+     * @param repoUrl      URL HTTPS của repo, ví dụ https://gitlab.com/team/shop.git
+     * @param branch       branch cần đọc; null/blank thì lấy analysis.git.default-branch
+     * @param requestToken token do người gọi truyền trong request; null/blank thì dùng cấu hình
+     *                     server. KHÔNG được log, không đưa vào message lỗi, không ghi ra file.
+     */
+    public FetchedRepo fetch(String repoUrl, String branch, String requestToken) {
         String normalizedUrl = requireHttpsUrl(repoUrl);
         String targetBranch = (branch == null || branch.isBlank())
                 ? this.properties.getGit().getDefaultBranch()
                 : branch.trim();
 
-        String remoteSha = remoteHeadSha(normalizedUrl, targetBranch);
+        // ls-remote chạy ở MỌI request với credential của người gọi, nên bản clone trong cache
+        // không thành cửa sau: token không có quyền là trượt ngay ở bước này, chưa tới cache.
+        String remoteSha = remoteHeadSha(normalizedUrl, targetBranch, requestToken);
         Path dir = cacheDir(normalizedUrl, targetBranch);
 
         String cachedSha = readCachedSha(dir);
@@ -87,19 +99,19 @@ public class GitRepoFetcher {
         }
 
         log.info("clone {} branch {} -> {} ({}; cache {} khác remote {})", normalizedUrl, targetBranch,
-                dir, describeAuth(), shortSha(cachedSha), shortSha(remoteSha));
+                dir, describeAuth(requestToken), shortSha(cachedSha), shortSha(remoteSha));
         deleteRecursively(dir);
-        String clonedSha = shallowClone(normalizedUrl, targetBranch, dir);
+        String clonedSha = shallowClone(normalizedUrl, targetBranch, dir, requestToken);
         writeCachedSha(dir, clonedSha);
         return new FetchedRepo(normalizedUrl, targetBranch, clonedSha, dir, false);
     }
 
-    private String remoteHeadSha(String repoUrl, String branch) {
+    private String remoteHeadSha(String repoUrl, String branch, String requestToken) {
         try {
             Collection<Ref> refs = Git.lsRemoteRepository()
                     .setRemote(repoUrl)
                     .setHeads(true)
-                    .setCredentialsProvider(credentials())
+                    .setCredentialsProvider(credentials(requestToken))
                     .setTimeout(this.properties.getGit().getTimeoutSeconds())
                     .call();
 
@@ -122,7 +134,7 @@ public class GitRepoFetcher {
                     + "'. Các branch đang có: " + String.join(", ", available));
         }
         catch (GitAPIException ex) {
-            throw new IllegalArgumentException(explainFailure(repoUrl, branch, ex), ex);
+            throw new IllegalArgumentException(explainFailure(repoUrl, branch, ex, requestToken), ex);
         }
     }
 
@@ -130,12 +142,13 @@ public class GitRepoFetcher {
      * GitLab trả đúng một câu "not authorized" cho rất nhiều nguyên nhân khác nhau, nên message
      * thô không giúp gì cho việc sửa. Ở đây liệt kê sẵn các nguyên nhân theo tần suất thực tế.
      */
-    private String explainFailure(String repoUrl, String branch, GitAPIException ex) {
+    private String explainFailure(String repoUrl, String branch, GitAPIException ex,
+            String requestToken) {
         String raw = String.valueOf(ex.getMessage());
         String lower = raw.toLowerCase(Locale.ROOT);
         StringBuilder message = new StringBuilder("Không đọc được repo ").append(repoUrl)
                 .append(" branch ").append(branch)
-                .append(" (").append(describeAuth()).append("). GitLab trả: ").append(raw);
+                .append(" (").append(describeAuth(requestToken)).append("). GitLab trả: ").append(raw);
 
         boolean unauthorized = lower.contains("not authorized") || lower.contains("401")
                 || lower.contains("authentication is required");
@@ -165,7 +178,7 @@ public class GitRepoFetcher {
         return message.toString();
     }
 
-    private String shallowClone(String repoUrl, String branch, Path dir) {
+    private String shallowClone(String repoUrl, String branch, Path dir, String requestToken) {
         try (Git git = Git.cloneRepository()
                 .setURI(repoUrl)
                 .setDirectory(dir.toFile())
@@ -174,7 +187,7 @@ public class GitRepoFetcher {
                 .setCloneAllBranches(false)
                 .setNoTags()
                 .setDepth(1)
-                .setCredentialsProvider(credentials())
+                .setCredentialsProvider(credentials(requestToken))
                 .setTimeout(this.properties.getGit().getTimeoutSeconds())
                 .call()) {
 
@@ -218,7 +231,33 @@ public class GitRepoFetcher {
      * bị 2FA chặn. Username/password để dành cho deploy token và GitLab self-hosted không 2FA.
      */
     Optional<GitCredentials> resolveCredentials() {
+        return resolveCredentials(null);
+    }
+
+    /**
+     * Như trên, nhưng token của request (nếu có) thắng cấu hình server.
+     *
+     * <p>Thứ tự: {@code gitToken} trong request → {@code analysis.git.token} → username/password.
+     * Token của người gọi đi trước vì đó là điểm của cơ chế này: người nào gọi thì đọc được đúng
+     * những repo mà chính họ có quyền. Nếu cấu hình tắt {@code analysis.git.allow-request-token}
+     * thì request có token bị TỪ CHỐI, không âm thầm rơi về token của server - im lặng dùng
+     * credential khác với cái người gọi gửi lên là cách tạo ra một lỗ phân quyền khó thấy.
+     *
+     * @param requestToken token lấy từ request; null/blank = không có
+     */
+    Optional<GitCredentials> resolveCredentials(String requestToken) {
         AnalysisProperties.Git git = this.properties.getGit();
+        String fromRequest = cleanSecret(requestToken, "gitToken (request)");
+        if (fromRequest != null) {
+            if (!git.isAllowRequestToken()) {
+                throw new IllegalArgumentException("Request có gitToken nhưng cấu hình "
+                        + "analysis.git.allow-request-token=false nên không dùng token của người "
+                        + "gọi. Bỏ trường gitToken ra khỏi request, hoặc bật lại cấu hình này.");
+            }
+            warnIfWrongTokenType(fromRequest, "gitToken trong request");
+            return Optional.of(new GitCredentials("oauth2", fromRequest, "gitToken (request)"));
+        }
+
         String token = cleanSecret(git.getToken(), "analysis.git.token (GITLAB_TOKEN)");
         String username = cleanSecret(git.getUsername(), "analysis.git.username (GIT_USERNAME)");
         String password = cleanSecret(git.getPassword(), "analysis.git.password (GIT_PASSWORD)");
@@ -243,8 +282,8 @@ public class GitRepoFetcher {
         return Optional.empty();
     }
 
-    private CredentialsProvider credentials() {
-        return resolveCredentials()
+    private CredentialsProvider credentials(String requestToken) {
+        return resolveCredentials(requestToken)
                 .map(credentials -> (CredentialsProvider) new UsernamePasswordCredentialsProvider(
                         credentials.username(), credentials.secret()))
                 .orElse(null);
@@ -280,31 +319,38 @@ public class GitRepoFetcher {
      * <p>Chỉ so prefix và chỉ log lại prefix, không bao giờ log phần thân token.
      */
     static void warnIfWrongTokenType(String token) {
+        warnIfWrongTokenType(token, "analysis.git.token");
+    }
+
+    /**
+     * @param label tên chỗ khai token, để log nói đúng nơi cần sửa (cấu hình server hay request)
+     */
+    static void warnIfWrongTokenType(String token, String label) {
         for (Map.Entry<String, String> entry : WRONG_TOKEN_PREFIXES.entrySet()) {
             if (token.startsWith(entry.getKey())) {
-                log.warn("analysis.git.token bắt đầu bằng '{}' - trông như {}. "
+                log.warn("{} bắt đầu bằng '{}' - trông như {}. "
                         + "Loại dùng được ở đây là personal/project/group access token (prefix 'glpat-').",
-                        entry.getKey(), entry.getValue());
+                        label, entry.getKey(), entry.getValue());
                 return;
             }
         }
         if (!token.startsWith("glpat-")) {
             // OAuth access token, impersonation token, token của self-hosted phiên bản cũ (không có
             // prefix) đều rơi vào đây và đều có thể hợp lệ -> chỉ ghi debug, không làm ồn log.
-            log.debug("analysis.git.token không có prefix 'glpat-'. Nếu đây là OAuth access token, "
-                    + "lưu ý nó hết hạn sau 2 giờ và service này không tự refresh.");
+            log.debug("{} không có prefix 'glpat-'. Nếu đây là OAuth access token, "
+                    + "lưu ý nó hết hạn sau 2 giờ và service này không tự refresh.", label);
         }
     }
 
     /** Mô tả cách xác thực đang dùng, an toàn để đưa vào log và message lỗi. */
-    private String describeAuth() {
+    private String describeAuth(String requestToken) {
         try {
-            return resolveCredentials()
+            return resolveCredentials(requestToken)
                     .map(credentials -> "xác thực bằng " + credentials.source()
                             + ", username=" + credentials.username())
                     .orElse("không có xác thực - chỉ đọc được repo public");
         }
-        catch (IllegalStateException ex) {
+        catch (IllegalStateException | IllegalArgumentException ex) {
             return "cấu hình xác thực không hợp lệ";
         }
     }
@@ -335,8 +381,8 @@ public class GitRepoFetcher {
         if (uri.getUserInfo() != null || trimmed.contains("@")) {
             throw new IllegalArgumentException("URL repo không được chứa tài khoản/mật khẩu "
                     + "(dạng https://user:pass@host/...) vì URL sẽ bị ghi vào log. "
-                    + "Hãy cấu hình qua biến môi trường GITLAB_TOKEN, hoặc "
-                    + "GIT_USERNAME + GIT_PASSWORD.");
+                    + "Hãy truyền gitToken trong body của request, hoặc cấu hình qua biến môi "
+                    + "trường GITLAB_TOKEN, hoặc GIT_USERNAME + GIT_PASSWORD.");
         }
         String host = uri.getHost();
         if (host == null) {

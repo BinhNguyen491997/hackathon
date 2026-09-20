@@ -61,7 +61,7 @@ public final class ProcedureFixtureRepo {
         }
 
         @Override
-        public FetchedRepo fetch(String repoUrl, String branch) {
+        public FetchedRepo fetch(String repoUrl, String branch, String requestToken) {
             return new FetchedRepo(REPO_URL, BRANCH, this.commitSha, root(), true);
         }
     }

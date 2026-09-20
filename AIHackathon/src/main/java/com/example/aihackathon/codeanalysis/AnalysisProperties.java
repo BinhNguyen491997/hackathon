@@ -187,6 +187,20 @@ public class AnalysisProperties {
         /** Password, PAT, hoặc secret của deploy token. Chỉ truyền qua biến môi trường. */
         private String password = "";
 
+        /**
+         * Cho phép người gọi truyền token GitLab trong body của request ({@code gitToken}).
+         *
+         * <p>Bật (mặc định) để mỗi người dùng đi bằng token của chính mình: agent không giữ
+         * credential nào, và quyền đọc repo đúng bằng quyền của người gọi thay vì bằng quyền của
+         * một token dùng chung khai trong env. Đánh đổi: token đi qua network ở mỗi lời gọi, nên
+         * endpoint phải chạy sau HTTPS và nên bật {@code agent.api-key}.
+         *
+         * <p>Tắt khi triển khai ở nơi mà token phải do hệ thống quản lý (đọc từ database/vault):
+         * lúc đó request có {@code gitToken} bị từ chối thẳng chứ không âm thầm dùng token của
+         * server - người gọi phải biết là token của họ KHÔNG được dùng.
+         */
+        private boolean allowRequestToken = true;
+
         /** Branch mặc định khi người dùng không nói rõ. */
         private String defaultBranch = "master";
 
@@ -220,6 +234,14 @@ public class AnalysisProperties {
 
         public void setPassword(String password) {
             this.password = password;
+        }
+
+        public boolean isAllowRequestToken() {
+            return this.allowRequestToken;
+        }
+
+        public void setAllowRequestToken(boolean allowRequestToken) {
+            this.allowRequestToken = allowRequestToken;
         }
 
         public String getDefaultBranch() {

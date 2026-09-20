@@ -86,14 +86,17 @@ public class ApiFlowController {
             throw new IllegalArgumentException("Cần ít nhất một trong hai: path hoặc summary.");
         }
         long startNanos = System.nanoTime();
-        log.info("--> POST /api/analyze/api-flow repo={} branch={} {} {} useAi={} crossCheckWithAi={}",
+        log.info("--> POST /api/analyze/api-flow repo={} branch={} {} {} useAi={} crossCheckWithAi={} "
+                        + "gitToken={}",
                 request.repoUrl(), request.branch(), request.httpMethod(), request.target(),
-                request.aiEnabled(), request.crossCheckEnabled());
+                request.aiEnabled(), request.crossCheckEnabled(),
+                request.hasGitToken() ? "của người gọi" : "cấu hình server");
 
         ApiFlowAnalyzer.AnalysisResult result = this.analyzer.analyzeFlowWith(request.repoUrl(),
                 request.branch(), request.httpMethod(), request.target(),
                 request.aiEnabled() ? this.narrativeWriter : NarrativeWriter.NONE,
-                request.crossCheckEnabled() ? this.flowProposer : FlowProposer.NONE);
+                request.crossCheckEnabled() ? this.flowProposer : FlowProposer.NONE,
+                request.gitToken());
 
         log.info("<-- POST /api/analyze/api-flow {} ms endpoint={} participants={} AI={} đối chiếu={}",
                 (System.nanoTime() - startNanos) / 1_000_000, result.flow().endpoint().label(),
@@ -124,6 +127,9 @@ public class ApiFlowController {
      * Khi đó cách chia sẻ cho BA là gửi file .html đã ghi sẵn trong analysis.output-dir, chứ
      * không phải gửi link. Tôi cố tình KHÔNG cho truyền api-key qua query param vì URL bị ghi
      * vào access log.
+     *
+     * <p>Cùng lý do đó, các endpoint GET ở dưới KHÔNG nhận {@code gitToken}: chỉ POST mới nhận,
+     * vì token phải nằm trong body. Muốn dùng token riêng thì gọi bản POST.
      */
     @GetMapping(path = "/api/analyze/api-flow.html", produces = "text/html; charset=UTF-8")
     public String analyzeAsHtml(
@@ -186,14 +192,16 @@ public class ApiFlowController {
             throw new IllegalArgumentException("Cần ít nhất một trong hai: path hoặc summary.");
         }
         long startNanos = System.nanoTime();
-        log.info("--> spec repo={} branch={} {} {} useAi={} crossCheckWithAi={}", request.repoUrl(),
-                request.branch(), request.httpMethod(), request.target(), request.aiEnabled(),
-                request.crossCheckEnabled());
+        log.info("--> spec repo={} branch={} {} {} useAi={} crossCheckWithAi={} gitToken={}",
+                request.repoUrl(), request.branch(), request.httpMethod(), request.target(),
+                request.aiEnabled(), request.crossCheckEnabled(),
+                request.hasGitToken() ? "của người gọi" : "cấu hình server");
 
         ApiFlowAnalyzer.SpecResult result = this.analyzer.specWith(request.repoUrl(),
                 request.branch(), request.httpMethod(), request.target(),
                 request.aiEnabled() ? this.narrativeWriter : NarrativeWriter.NONE,
-                request.crossCheckEnabled() ? this.flowProposer : FlowProposer.NONE);
+                request.crossCheckEnabled() ? this.flowProposer : FlowProposer.NONE,
+                request.gitToken());
 
         log.info("<-- spec {} ms | endpoint={} | AI={} ({} lượt) | đối chiếu={} (đồng thuận {}%) "
                         + "| {} dẫn chứng | {} câu hỏi",
@@ -249,13 +257,14 @@ public class ApiFlowController {
             throw new IllegalArgumentException("Cần ít nhất một trong hai: path hoặc summary.");
         }
         return SpecResponse.from(this.analyzer.collectSpec(request.repoUrl(), request.branch(),
-                request.httpMethod(), request.target()));
+                request.httpMethod(), request.target(), request.gitToken()));
     }
 
     /** Liệt kê toàn bộ endpoint trong repo - dùng khi BA chưa biết path chính xác. */
     @PostMapping(path = "/api/analyze/endpoints", produces = MediaType.APPLICATION_JSON_VALUE)
     public List<EndpointView> endpoints(@Valid @RequestBody EndpointListRequest request) {
-        List<ApiEndpoint> endpoints = this.analyzer.endpoints(request.repoUrl(), request.branch());
+        List<ApiEndpoint> endpoints = this.analyzer.endpoints(request.repoUrl(), request.branch(),
+                request.gitToken());
         log.info("liệt kê {} endpoint từ {}", endpoints.size(), request.repoUrl());
         return endpoints.stream()
                 .map(endpoint -> new EndpointView(endpoint.httpMethod(), endpoint.path(),
@@ -264,9 +273,21 @@ public class ApiFlowController {
                 .toList();
     }
 
+    /**
+     * @param gitToken token GitLab của người gọi; để trống thì dùng cấu hình server. Xem
+     *                 {@link ApiFlowRequest#gitToken()} để biết vì sao trường này không có
+     *                 ràng buộc validation.
+     */
     public record EndpointListRequest(
             @jakarta.validation.constraints.NotBlank String repoUrl,
-            String branch) {
+            String branch,
+            String gitToken) {
+
+        @Override
+        public String toString() {
+            return "EndpointListRequest[repoUrl=%s, branch=%s, gitToken=%s]".formatted(this.repoUrl,
+                    this.branch, this.gitToken == null || this.gitToken.isBlank() ? "(trống)" : "***");
+        }
     }
 
     public record EndpointView(String httpMethod, String path, String summary, String handler,

@@ -185,6 +185,65 @@ class GitRepoFetcherAuthTests {
     }
 
     // ------------------------------------------------------------------
+    // Token do người gọi truyền trong request
+    // ------------------------------------------------------------------
+
+    @Test
+    void tokenCuaRequestThangCauHinhServer() {
+        this.properties.getGit().setToken("glpat-cua-server");
+
+        Optional<GitCredentials> credentials = this.fetcher.resolveCredentials("glpat-cua-nguoi-goi");
+
+        assertThat(credentials).isPresent();
+        assertThat(credentials.get().username()).isEqualTo("oauth2");
+        assertThat(credentials.get().secret()).isEqualTo("glpat-cua-nguoi-goi");
+        assertThat(credentials.get().source()).isEqualTo("gitToken (request)");
+    }
+
+    @Test
+    void khongCoTokenTrongRequestThiDungCauHinhServer() {
+        this.properties.getGit().setToken("glpat-cua-server");
+
+        for (String empty : java.util.List.of("", "   ")) {
+            assertThat(this.fetcher.resolveCredentials(empty))
+                    .get()
+                    .extracting(GitCredentials::secret, GitCredentials::source)
+                    .containsExactly("glpat-cua-server", "analysis.git.token");
+        }
+        assertThat(this.fetcher.resolveCredentials(null))
+                .get()
+                .extracting(GitCredentials::secret)
+                .isEqualTo("glpat-cua-server");
+    }
+
+    /**
+     * Tắt cấu hình thì phải BÁO LỖI, không được im lặng rơi về token của server: người gọi tưởng
+     * mình đi bằng quyền của mình mà thực ra đi bằng quyền của service là một lỗ phân quyền.
+     */
+    @Test
+    void tuChoiRequestCoTokenKhiCauHinhTat() {
+        this.properties.getGit().setAllowRequestToken(false);
+        this.properties.getGit().setToken("glpat-cua-server");
+
+        assertThatThrownBy(() -> this.fetcher.resolveCredentials("glpat-cua-nguoi-goi"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("allow-request-token")
+                .hasMessageNotContaining("glpat-cua-nguoi-goi");
+    }
+
+    @Test
+    void tokenCuaRequestCungDuocBoDauNhayVaKhongLotVaoToString() {
+        assertThat(this.fetcher.resolveCredentials("  \"glpat-abc123\"  "))
+                .get()
+                .extracting(GitCredentials::secret)
+                .isEqualTo("glpat-abc123");
+
+        assertThat(this.fetcher.resolveCredentials("glpat-secret-that").orElseThrow().toString())
+                .doesNotContain("glpat-secret-that")
+                .contains("secret=***");
+    }
+
+    // ------------------------------------------------------------------
     // Kiểm tra URL
     // ------------------------------------------------------------------
 
