@@ -8,3 +8,11 @@ client/
 .git/
 .gitignore
 .gitattributes
+
+# Secret - tuyệt đối không bake vào image
+.env
+.env.*
+.greennode.json
+.agentbase/
+config/
+*registry-credentials*.json

@@ -35,6 +35,20 @@ public class ChatController {
         return Map.of("status", "UP");
     }
 
+    /**
+     * Health check cho AgentBase Runtime.
+     *
+     * <p>Platform bắt buộc {@code GET /health} trả 200 để đánh dấu runtime ACTIVE - đường dẫn cố
+     * định, không đổi được. Giữ {@code /api/health} riêng cho client sẵn có.
+     *
+     * <p>Path không bắt đầu bằng {@code /api/} nên {@link ApiKeyFilter} tự động cho qua, đúng ý vì
+     * probe của platform không gửi được header {@code X-API-Key}.
+     */
+    @GetMapping("/health")
+    public Map<String, String> platformHealth() {
+        return Map.of("status", "UP");
+    }
+
     /** Hỏi đáp một lượt, trả JSON. */
     @PostMapping(path = "/api/chat", produces = MediaType.APPLICATION_JSON_VALUE)
     public ChatReply chat(@Valid @RequestBody ChatRequest request) {
